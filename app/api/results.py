@@ -594,7 +594,7 @@ async def export_results(
                     "code": "DEPENDENCY_UNAVAILABLE",
                     "message": (
                         "PDF export requires WeasyPrint, which is not installed. "
-                        "Install it with: pip install 'ai-analyst-api[pdf]'"
+                        "Install it with: pip install 'the-analyst-api[pdf]'"
                     ),
                 },
             )

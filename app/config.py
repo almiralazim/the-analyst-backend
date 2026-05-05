@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     )
 
     # Application
-    app_name: str = "ai-analyst-api"
+    app_name: str = "the-analyst-api"
     app_version: str = "0.1.0"
     debug: bool = False
 
