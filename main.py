@@ -38,9 +38,83 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
+    description="""
+# The Analyst API
+
+A backend service that accepts CSV/Excel uploads, runs a multi-agent analytical pipeline powered by LLMs,
+and returns validated findings with confidence scoring. The system learns from corrections and accumulated
+knowledge to improve future analyses.
+
+## Core Workflow
+
+1. **Upload** a dataset (CSV/Excel) via `POST /api/v1/datasets`
+2. **Ask a question** via `POST /api/v1/pipelines` — agents execute asynchronously
+3. **Monitor progress** via WebSocket at `/api/v1/pipelines/{id}/ws` or poll status
+4. **Retrieve results** — findings, charts, narrative, and confidence grade from `/api/v1/results/{id}`
+5. **Teach the system** — log corrections and learnings via `/api/v1/knowledge/*`
+
+## Authentication
+
+All endpoints (except `/auth/register`, `/auth/login`, `/auth/refresh`, and `/health`) require a
+Bearer token in the `Authorization` header:
+
+```
+Authorization: Bearer <access_token>
+```
+
+Tokens are obtained from the auth endpoints and expire after 60 minutes. Use the refresh endpoint
+to obtain a new access token without re-authenticating.
+
+## Error Format
+
+All errors follow a consistent shape:
+
+```json
+{
+  "error": {
+    "code": "ERROR_CODE",
+    "message": "Human-readable description"
+  }
+}
+```
+
+## Rate Limiting
+
+Endpoints are rate-limited per user. When exceeded, a `429` response is returned with a
+`Retry-After` header indicating how long to wait before retrying.
+
+## WebSocket
+
+Real-time pipeline progress is available via WebSocket at:
+```
+ws://<host>/api/v1/pipelines/{pipeline_id}/ws?token=<access_token>
+```
+""",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
+    openapi_tags=[
+        {
+            "name": "auth",
+            "description": "User registration, login, token refresh, and profile retrieval.",
+        },
+        {
+            "name": "datasets",
+            "description": "Upload, list, inspect, preview, and delete datasets (CSV/Excel files).",
+        },
+        {
+            "name": "pipelines",
+            "description": "Create, monitor, and cancel AI analysis pipelines. Includes WebSocket for real-time progress.",
+        },
+        {
+            "name": "results",
+            "description": "Retrieve analysis results: findings, charts, narrative, validation, and export to HTML/PDF/DOCX.",
+        },
+        {
+            "name": "knowledge",
+            "description": "Manage corrections and learnings that improve future analyses.",
+        },
+    ],
 )
 
 # Rate limiting
@@ -156,3 +230,29 @@ app.include_router(datasets_router, prefix=_API_PREFIX)
 app.include_router(pipelines_router, prefix=_API_PREFIX)
 app.include_router(results_router, prefix=_API_PREFIX)
 app.include_router(knowledge_router, prefix=_API_PREFIX)
+
+
+# ---------------------------------------------------------------------------
+# Patch OpenAPI schema so Swagger UI renders file upload pickers correctly.
+# FastAPI 0.115+ generates OpenAPI 3.1 with contentMediaType but Swagger UI
+# needs format: binary to show the file chooser widget.
+# ---------------------------------------------------------------------------
+
+_original_openapi = app.openapi
+
+
+def _patched_openapi():
+    schema = _original_openapi()
+    for schema_name, schema_def in schema.get("components", {}).get("schemas", {}).items():
+        for prop_name, prop in schema_def.get("properties", {}).items():
+            # Patch array items with contentMediaType to also have format: binary
+            items = prop.get("items", {})
+            if items.get("contentMediaType") == "application/octet-stream":
+                items["format"] = "binary"
+            # Patch direct properties with contentMediaType
+            if prop.get("contentMediaType") == "application/octet-stream":
+                prop["format"] = "binary"
+    return schema
+
+
+app.openapi = _patched_openapi
