@@ -46,7 +46,14 @@ async def _get_pipeline_with_results(
     return pipeline, results
 
 
-@router.get("/{pipeline_id}", responses={404: {"description": "Pipeline not found"}})
+@router.get(
+    "/{pipeline_id}",
+    summary="Get full analysis results for a pipeline",
+    responses={
+        401: {"description": "Missing or invalid access token"},
+        404: {"description": "Pipeline not found or not owned by user"},
+    },
+)
 @limiter.limit(settings.rate_limit_default)
 async def get_results(
     request: Request,
@@ -54,7 +61,81 @@ async def get_results(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Get full analysis results for a completed pipeline."""
+    """Get the complete analysis results for a finished pipeline.
+
+    **Authentication:** Required — Bearer token in `Authorization` header.
+
+    **Path Parameters:**
+    - `pipeline_id` (UUID, required): The pipeline's unique identifier.
+
+    **Response (200):**
+    ```json
+    {
+      "data": {
+        "pipeline_id": "uuid",
+        "question": "What drove revenue growth in Q4?",
+        "status": "completed",
+        "confidence_grade": "A",
+        "confidence_score": 0.92,
+        "duration_ms": 95000,
+        "findings": [
+          {
+            "headline": "Revenue grew 23% driven by enterprise segment",
+            "detail": "Enterprise deals increased by...",
+            "impact": "high",
+            "confidence": 0.95,
+            "sources": ["sales_data.orders"]
+          }
+        ],
+        "charts": [
+          {
+            "id": "chart-uuid",
+            "title": "Revenue by Segment",
+            "type": "bar",
+            "url": "/api/v1/results/{pipeline_id}/charts/{chart_id}",
+            "width": 1500,
+            "height": 900
+          }
+        ],
+        "narrative": {
+          "executive_summary": "...",
+          "detailed_findings": "...",
+          "recommendations": [...]
+        },
+        "validation": {
+          "structural": {"status": "pass", "checks": 12, "failures": 0},
+          "logical": {"status": "pass", "checks": 8, "failures": 0},
+          "business_rules": {"status": "warn", "checks": 5, "failures": 1},
+          "simpsons_paradox": {"status": "pass"},
+          "overall_grade": "A",
+          "overall_score": 0.92
+        },
+        "agent_summary": [
+          {"agent": "data_explorer", "status": "completed", "duration_ms": 4500}
+        ]
+      },
+      "meta": {
+        "dataset_id": "uuid",
+        "dataset_name": "Q4 Sales Data",
+        "execution_plan": "deep_dive",
+        "created_at": "2025-01-15T10:30:00Z",
+        "completed_at": "2025-01-15T10:31:35Z"
+      }
+    }
+    ```
+
+    **Errors:**
+    - `401 Unauthorized`: Access token is missing or invalid.
+    - `404 Not Found`: Pipeline does not exist or belongs to another user.
+
+    **Frontend Integration:**
+    - Only call this after the pipeline `status` is `"completed"`.
+    - Use `findings` array to render insight cards with headline, detail, and impact badge.
+    - Use `charts[].url` to load chart images (supports PNG, SVG, PDF via format query param).
+    - Use `narrative.executive_summary` for the top-level summary section.
+    - Use `validation.overall_grade` to show a confidence badge (A/B/C/D/F).
+    - The `meta` section provides context about the source dataset and timing.
+    """
     pipeline, results = await _get_pipeline_with_results(pipeline_id, user.id, db)
 
     # Get dataset name
@@ -116,7 +197,14 @@ async def get_results(
     }
 
 
-@router.get("/{pipeline_id}/findings", responses={404: {"description": "Pipeline not found"}})
+@router.get(
+    "/{pipeline_id}/findings",
+    summary="Get findings only for a pipeline",
+    responses={
+        401: {"description": "Missing or invalid access token"},
+        404: {"description": "Pipeline not found or not owned by user"},
+    },
+)
 @limiter.limit(settings.rate_limit_default)
 async def get_findings(
     request: Request,
@@ -124,7 +212,39 @@ async def get_findings(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Get findings only."""
+    """Get only the findings (insights) from a completed pipeline.
+
+    **Authentication:** Required — Bearer token in `Authorization` header.
+
+    **Path Parameters:**
+    - `pipeline_id` (UUID, required): The pipeline's unique identifier.
+
+    **Response (200):**
+    ```json
+    {
+      "data": [
+        {
+          "headline": "Revenue grew 23% driven by enterprise segment",
+          "detail": "Enterprise deals increased by 45% while SMB remained flat...",
+          "impact": "high",
+          "confidence": 0.95,
+          "supporting_data": {"metric": "revenue", "change": 0.23},
+          "sources": ["sales_data.orders", "sales_data.customers"]
+        }
+      ]
+    }
+    ```
+
+    **Errors:**
+    - `401 Unauthorized`: Access token is missing or invalid.
+    - `404 Not Found`: Pipeline does not exist or belongs to another user.
+
+    **Frontend Integration:**
+    - Use this endpoint when you only need findings without charts/narrative (lighter payload).
+    - Sort findings by `impact` (high → medium → low) for display priority.
+    - Use `confidence` (0-1) to show a confidence indicator per finding.
+    - The `sources` array lists which tables/columns were used to derive the finding.
+    """
     _, results = await _get_pipeline_with_results(pipeline_id, user.id, db)
     findings = [r.content for r in results if r.result_type == "finding" and r.content]
     return {"data": findings}
@@ -139,8 +259,10 @@ _CHART_MEDIA_TYPES = {
 
 @router.get(
     "/{pipeline_id}/charts/{chart_id}",
+    summary="Get a chart image in PNG, SVG, or PDF format",
     responses={
         400: {"description": "Invalid chart format requested"},
+        401: {"description": "Missing or invalid access token"},
         404: {"description": "Pipeline or chart not found"},
         500: {"description": "Chart format conversion failed"},
     },
@@ -154,7 +276,50 @@ async def get_chart(
     db: Annotated[AsyncSession, Depends(get_db)],
     format: Annotated[str, Query()] = "png",
 ):
-    """Get a specific chart image in PNG, SVG, or PDF format."""
+    """Retrieve a specific chart image, optionally converted to SVG or PDF.
+
+    **Authentication:** Required — Bearer token in `Authorization` header.
+
+    **Path Parameters:**
+    - `pipeline_id` (UUID, required): The pipeline's unique identifier.
+    - `chart_id` (string, required): The chart's identifier (from the results response).
+
+    **Query Parameters:**
+    - `format` (string, optional, default="png"): Output format. One of: `png`, `svg`, `pdf`.
+
+    **Response:** Binary image file with appropriate Content-Type header.
+    - PNG: `image/png`
+    - SVG: `image/svg+xml`
+    - PDF: `application/pdf`
+
+    **Response Headers:**
+    - `Cache-Control: public, max-age=31536000, immutable` — charts are immutable once generated.
+    - `ETag: "<hash>"` — content-based ETag for conditional requests.
+
+    **Errors:**
+    - `400 Bad Request`: Invalid format value (must be png, svg, or pdf).
+    - `401 Unauthorized`: Access token is missing or invalid.
+    - `404 Not Found`: Pipeline or chart not found.
+    - `500 Internal Server Error`: Format conversion failed (SVG/PDF conversion issue).
+
+    **Frontend Integration:**
+    - Use the chart URL directly in `<img src="...">` tags for PNG format.
+    - Add `?format=svg` for scalable vector graphics (better for responsive layouts).
+    - Add `?format=pdf` for print-quality exports.
+    - Charts are immutable and aggressively cached — safe to cache indefinitely on the client.
+    - Use the `ETag` header for conditional requests (`If-None-Match`) to avoid re-downloads.
+    - Include the auth token in the request (use fetch + blob URL pattern for `<img>` tags).
+
+    **Example (loading chart in React):**
+    ```javascript
+    const res = await fetch(`/api/v1/results/${pipelineId}/charts/${chartId}?format=png`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    // Use `url` as img src, revoke when component unmounts
+    ```
+    """
     if format not in _CHART_MEDIA_TYPES:
         raise HTTPException(
             status_code=400,
@@ -264,7 +429,14 @@ async def get_chart(
     )
 
 
-@router.get("/{pipeline_id}/narrative", responses={404: {"description": "Pipeline not found"}})
+@router.get(
+    "/{pipeline_id}/narrative",
+    summary="Get narrative text for a pipeline",
+    responses={
+        401: {"description": "Missing or invalid access token"},
+        404: {"description": "Pipeline not found or not owned by user"},
+    },
+)
 @limiter.limit(settings.rate_limit_default)
 async def get_narrative(
     request: Request,
@@ -272,7 +444,41 @@ async def get_narrative(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Get narrative text only."""
+    """Get only the narrative (executive summary + detailed analysis) from a pipeline.
+
+    **Authentication:** Required — Bearer token in `Authorization` header.
+
+    **Path Parameters:**
+    - `pipeline_id` (UUID, required): The pipeline's unique identifier.
+
+    **Response (200):**
+    ```json
+    {
+      "data": {
+        "executive_summary": "Revenue grew 23% in Q4, primarily driven by...",
+        "detailed_findings": "## Key Drivers\\n\\n1. Enterprise segment...",
+        "recommendations": [
+          {
+            "action": "Increase enterprise sales team headcount",
+            "rationale": "Enterprise segment shows 3x ROI vs SMB",
+            "confidence": "high",
+            "impact": "high"
+          }
+        ]
+      }
+    }
+    ```
+
+    **Errors:**
+    - `401 Unauthorized`: Access token is missing or invalid.
+    - `404 Not Found`: Pipeline does not exist or belongs to another user.
+
+    **Frontend Integration:**
+    - `executive_summary` is plain text suitable for a hero section.
+    - `detailed_findings` may contain markdown — render with a markdown parser.
+    - `recommendations` is a structured array for rendering action cards.
+    - Returns `null` for `data` if the pipeline hasn't produced a narrative yet.
+    """
     _, results = await _get_pipeline_with_results(pipeline_id, user.id, db)
     narrative_results = [r for r in results if r.result_type == "narrative"]
     narrative = narrative_results[0].content if narrative_results else None
@@ -281,10 +487,12 @@ async def get_narrative(
 
 @router.get(
     "/{pipeline_id}/export/{fmt}",
+    summary="Export analysis results as HTML, PDF, or DOCX",
     responses={
-        400: {"description": "Invalid format"},
-        404: {"description": "Pipeline not found"},
-        503: {"description": "Export dependency unavailable"},
+        400: {"description": "Invalid export format"},
+        401: {"description": "Missing or invalid access token"},
+        404: {"description": "Pipeline not found or not owned by user"},
+        503: {"description": "Export dependency unavailable (e.g., WeasyPrint for PDF)"},
     },
 )
 @limiter.limit(settings.rate_limit_default)
@@ -295,7 +503,46 @@ async def export_results(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Export results as HTML, PDF, or DOCX."""
+    """Export the full analysis results as a downloadable document.
+
+    **Authentication:** Required — Bearer token in `Authorization` header.
+
+    **Path Parameters:**
+    - `pipeline_id` (UUID, required): The pipeline's unique identifier.
+    - `fmt` (string, required): Export format. One of: `html`, `pdf`, `docx`.
+
+    **Response:** Binary file download with appropriate Content-Type and Content-Disposition headers.
+    - HTML: `text/html` — self-contained HTML document with inline styles.
+    - PDF: `application/pdf` — formatted PDF report (requires WeasyPrint on server).
+    - DOCX: `application/vnd.openxmlformats-officedocument.wordprocessingml.document`
+
+    **Response Headers:**
+    - `Content-Disposition: attachment; filename="analysis_{pipeline_id}.{fmt}"`
+
+    **Errors:**
+    - `400 Bad Request`: Invalid format (must be html, pdf, or docx).
+    - `401 Unauthorized`: Access token is missing or invalid.
+    - `404 Not Found`: Pipeline does not exist or belongs to another user.
+    - `503 Service Unavailable`: PDF export requires WeasyPrint which is not installed.
+
+    **Frontend Integration:**
+    - Trigger download using fetch + blob pattern:
+    ```javascript
+    const res = await fetch(`/api/v1/results/${pipelineId}/export/pdf`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `analysis_${pipelineId}.pdf`;
+    a.click();
+    URL.revokeObjectURL(url);
+    ```
+    - Show a loading spinner during export — PDF generation can take a few seconds.
+    - If 503 is returned for PDF, fall back to HTML export or show a message that PDF is unavailable.
+    - HTML export is always available and is the fastest option.
+    """
     valid_formats = ("html", "pdf", "docx")
     if fmt not in valid_formats:
         raise HTTPException(

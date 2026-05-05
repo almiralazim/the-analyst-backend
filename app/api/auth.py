@@ -31,9 +31,52 @@ from app.services.auth import (
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-@router.post("/register", response_model=ApiResponse[AuthResponse], status_code=201)
+@router.post(
+    "/register",
+    response_model=ApiResponse[AuthResponse],
+    response_model_exclude_none=True,
+    status_code=201,
+    summary="Register a new user account",
+    responses={
+        409: {"description": "Email already registered"},
+        422: {"description": "Validation error (invalid email format, password too short)"},
+    },
+)
 @limiter.limit(settings.rate_limit_default)
 async def register(request: Request, body: RegisterRequest, db: AsyncSession = Depends(get_db)):
+    """Create a new user account and return authentication tokens.
+
+    **Authentication:** None required (public endpoint)
+
+    **Request Body:**
+    - `email` (string, required): Valid email address. Must be unique across all accounts.
+    - `password` (string, required): Minimum 8 characters, maximum 128 characters.
+    - `display_name` (string, optional): User's display name, max 100 characters.
+
+    **Response (201):**
+    ```json
+    {
+      "data": {
+        "user": {"id": "uuid", "email": "user@example.com", "display_name": "...", "role": "user", "preferences": {}, "created_at": "..."},
+        "access_token": "eyJhbGciOiJIUzI1NiIs...",
+        "refresh_token": "eyJhbGciOiJIUzI1NiIs...",
+        "token_type": "bearer",
+        "expires_in": 3600
+      }
+    }
+    ```
+
+    **Errors:**
+    - `409 Conflict`: Email already registered — user must login or use a different email.
+    - `422 Unprocessable Entity`: Invalid input (bad email format, password shorter than 8 chars).
+
+    **Frontend Integration:**
+    - Store `access_token` in memory (not localStorage for security).
+    - Store `refresh_token` in an HttpOnly cookie or secure storage.
+    - Use `access_token` in `Authorization: Bearer <token>` header for all subsequent requests.
+    - Token expires in `expires_in` seconds; refresh before expiry using `/auth/refresh`.
+    - After registration, the user is automatically logged in — no separate login call needed.
+    """
     existing = await db.execute(select(User).where(User.email == body.email))
     if existing.scalar_one_or_none():
         raise HTTPException(
@@ -60,9 +103,49 @@ async def register(request: Request, body: RegisterRequest, db: AsyncSession = D
     ))
 
 
-@router.post("/login", response_model=ApiResponse[AuthResponse])
+@router.post(
+    "/login",
+    response_model=ApiResponse[AuthResponse],
+    response_model_exclude_none=True,
+    summary="Authenticate with email and password",
+    responses={
+        401: {"description": "Invalid email or password"},
+        422: {"description": "Validation error (missing fields)"},
+    },
+)
 @limiter.limit(settings.rate_limit_default)
 async def login(request: Request, body: LoginRequest, db: AsyncSession = Depends(get_db)):
+    """Authenticate a user and return access + refresh tokens.
+
+    **Authentication:** None required (public endpoint)
+
+    **Request Body:**
+    - `email` (string, required): The user's registered email address.
+    - `password` (string, required): The user's password.
+
+    **Response (200):**
+    ```json
+    {
+      "data": {
+        "access_token": "eyJhbGciOiJIUzI1NiIs...",
+        "refresh_token": "eyJhbGciOiJIUzI1NiIs...",
+        "token_type": "bearer",
+        "expires_in": 3600
+      }
+    }
+    ```
+
+    **Errors:**
+    - `401 Unauthorized`: Invalid email or password. The error message is intentionally
+      generic to prevent email enumeration attacks.
+    - `422 Unprocessable Entity`: Missing required fields.
+
+    **Frontend Integration:**
+    - On success, store tokens the same way as after registration.
+    - On 401, show a generic "Invalid credentials" message — do not distinguish between
+      wrong email vs. wrong password for security reasons.
+    - Implement rate-limit-aware retry: if you receive 429, wait for `Retry-After` header value.
+    """
     result = await db.execute(select(User).where(User.email == body.email))
     user = result.scalar_one_or_none()
 
@@ -82,9 +165,47 @@ async def login(request: Request, body: LoginRequest, db: AsyncSession = Depends
     ))
 
 
-@router.post("/refresh", response_model=ApiResponse[TokenRefreshResponse])
+@router.post(
+    "/refresh",
+    response_model=ApiResponse[TokenRefreshResponse],
+    response_model_exclude_none=True,
+    summary="Refresh an expired access token",
+    responses={
+        401: {"description": "Invalid or expired refresh token"},
+        422: {"description": "Validation error (missing refresh_token)"},
+    },
+)
 @limiter.limit(settings.rate_limit_default)
 async def refresh(request: Request, body: RefreshRequest, db: AsyncSession = Depends(get_db)):
+    """Exchange a valid refresh token for a new access token.
+
+    **Authentication:** None required (uses refresh_token in body)
+
+    **Request Body:**
+    - `refresh_token` (string, required): A valid, non-expired refresh token
+      obtained from `/auth/register` or `/auth/login`.
+
+    **Response (200):**
+    ```json
+    {
+      "data": {
+        "access_token": "eyJhbGciOiJIUzI1NiIs...",
+        "expires_in": 3600
+      }
+    }
+    ```
+
+    **Errors:**
+    - `401 Unauthorized`: The refresh token is invalid, expired, or has the wrong type.
+
+    **Frontend Integration:**
+    - Call this endpoint before the access token expires (check `expires_in` from login).
+    - Implement a token refresh interceptor in your HTTP client:
+      1. If a request returns 401, attempt a token refresh.
+      2. If refresh succeeds, retry the original request with the new access token.
+      3. If refresh fails (401), redirect to login.
+    - Refresh tokens expire after 7 days. After that, the user must re-authenticate.
+    """
     payload = decode_token(body.refresh_token)
     if payload.get("type") != "refresh":
         raise HTTPException(
@@ -102,7 +223,41 @@ async def refresh(request: Request, body: RefreshRequest, db: AsyncSession = Dep
     ))
 
 
-@router.get("/me", response_model=ApiResponse[UserResponse])
+@router.get(
+    "/me",
+    response_model=ApiResponse[UserResponse],
+    response_model_exclude_none=True,
+    summary="Get current user profile",
+    responses={
+        401: {"description": "Missing or invalid access token"},
+    },
+)
 @limiter.limit(settings.rate_limit_default)
 async def me(request: Request, user: User = Depends(get_current_user)):
+    """Return the authenticated user's profile information.
+
+    **Authentication:** Required — Bearer token in `Authorization` header.
+
+    **Response (200):**
+    ```json
+    {
+      "data": {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "email": "user@example.com",
+        "display_name": "Jane Doe",
+        "role": "user",
+        "preferences": {},
+        "created_at": "2025-01-15T10:30:00Z"
+      }
+    }
+    ```
+
+    **Errors:**
+    - `401 Unauthorized`: Access token is missing, malformed, or expired.
+
+    **Frontend Integration:**
+    - Call this on app initialization to verify the stored token is still valid.
+    - Use the response to populate user profile UI and determine role-based access.
+    - If this returns 401, trigger the token refresh flow or redirect to login.
+    """
     return ApiResponse(data=UserResponse.model_validate(user))

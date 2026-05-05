@@ -36,8 +36,14 @@ _background_tasks: set[asyncio.Task] = set()
 @router.post(
     "",
     response_model=ApiResponse[PipelineResponse],
+    response_model_exclude_none=True,
     status_code=201,
-    responses={404: {"description": "Dataset not found"}, 400: {"description": "Dataset not ready"}},
+    summary="Create and start a new analysis pipeline",
+    responses={
+        400: {"description": "Dataset not ready for analysis"},
+        404: {"description": "Dataset not found or not owned by user"},
+        422: {"description": "Validation error (question too short/long, invalid plan)"},
+    },
 )
 @limiter.limit(settings.rate_limit_heavy)
 async def create_pipeline(
@@ -46,6 +52,52 @@ async def create_pipeline(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
+    """Create a new analysis pipeline that runs AI agents against a dataset.
+
+    **Authentication:** Required — Bearer token in `Authorization` header.
+
+    **Request Body:**
+    - `dataset_id` (UUID, required): ID of a dataset with `status: "ready"`.
+    - `question` (string, required): The analytical question to answer. 5-2000 characters.
+    - `plan` (string, optional, default="deep_dive"): Execution plan type.
+      One of: `"deep_dive"`, `"full_presentation"`, `"validate_only"`.
+
+    **Execution Plans:**
+    - `deep_dive`: Full 10-agent pipeline with findings, charts, narrative, and validation.
+    - `full_presentation`: Same as deep_dive but optimized for presentation output.
+    - `validate_only`: Runs only validation agents — useful for verifying existing analyses.
+
+    **Response (201):**
+    ```json
+    {
+      "data": {
+        "id": "uuid",
+        "dataset_id": "uuid",
+        "question": "What drove revenue growth in Q4?",
+        "execution_plan": "deep_dive",
+        "status": "queued",
+        "created_at": "2025-01-15T10:30:00Z",
+        "agents": []
+      }
+    }
+    ```
+
+    **Pipeline Status Lifecycle:**
+    `queued` → `running` → `completed` | `failed` | `cancelled`
+
+    **Errors:**
+    - `400 Bad Request`: Dataset exists but is not in `"ready"` status.
+    - `404 Not Found`: Dataset does not exist or belongs to another user.
+    - `422 Unprocessable Entity`: Question too short (<5 chars) or too long (>2000 chars),
+      or invalid plan value.
+
+    **Frontend Integration:**
+    - After creating a pipeline, immediately connect to the WebSocket endpoint
+      `ws://host/api/v1/pipelines/{id}/ws?token=<access_token>` to receive real-time progress.
+    - Alternatively, poll `GET /api/v1/pipelines/{id}` every 3-5 seconds.
+    - The pipeline runs asynchronously — the 201 response returns immediately with `status: "queued"`.
+    - This endpoint is rate-limited to 10 requests/minute (heavy operation).
+    """
     # Verify dataset exists and belongs to user
     result = await db.execute(
         select(Dataset).where(Dataset.id == body.dataset_id, Dataset.user_id == user.id)
@@ -85,7 +137,15 @@ async def create_pipeline(
     ))
 
 
-@router.get("", response_model=PaginatedResponse[PipelineResponse])
+@router.get(
+    "",
+    response_model=PaginatedResponse[PipelineResponse],
+    response_model_exclude_none=True,
+    summary="List all pipelines for the current user",
+    responses={
+        401: {"description": "Missing or invalid access token"},
+    },
+)
 @limiter.limit(settings.rate_limit_default)
 async def list_pipelines(
     request: Request,
@@ -94,6 +154,48 @@ async def list_pipelines(
     page: int = 1,
     page_size: int = 20,
 ):
+    """List all pipeline runs for the authenticated user, with pagination.
+
+    **Authentication:** Required — Bearer token in `Authorization` header.
+
+    **Query Parameters:**
+    - `page` (int, optional, default=1): Page number (1-indexed).
+    - `page_size` (int, optional, default=20): Number of items per page.
+
+    **Response (200):**
+    ```json
+    {
+      "data": [
+        {
+          "id": "uuid",
+          "dataset_id": "uuid",
+          "question": "What drove revenue growth in Q4?",
+          "complexity": "moderate",
+          "execution_plan": "deep_dive",
+          "status": "completed",
+          "confidence_grade": "A",
+          "confidence_score": 0.92,
+          "started_at": "2025-01-15T10:30:01Z",
+          "completed_at": "2025-01-15T10:31:45Z",
+          "agents": [
+            {"name": "data_explorer", "tier": 1, "status": "completed", "duration_ms": 4500}
+          ],
+          "created_at": "2025-01-15T10:30:00Z"
+        }
+      ],
+      "meta": {"total": 15, "page": 1, "page_size": 20}
+    }
+    ```
+
+    **Errors:**
+    - `401 Unauthorized`: Access token is missing or invalid.
+
+    **Frontend Integration:**
+    - Results are ordered by `created_at` descending (newest first).
+    - Use `status` to show pipeline state badges (queued, running, completed, failed, cancelled).
+    - Use `confidence_grade` (A/B/C/D/F) for a quick quality indicator.
+    - The `agents` array shows per-agent execution status for progress visualization.
+    """
     offset = (page - 1) * page_size
     query = (
         select(PipelineRun)
@@ -116,7 +218,12 @@ async def list_pipelines(
 @router.get(
     "/{pipeline_id}",
     response_model=ApiResponse[PipelineResponse],
-    responses={404: {"description": "Pipeline not found"}},
+    response_model_exclude_none=True,
+    summary="Get pipeline status and details",
+    responses={
+        401: {"description": "Missing or invalid access token"},
+        404: {"description": "Pipeline not found or not owned by user"},
+    },
 )
 @limiter.limit(settings.rate_limit_default)
 async def get_pipeline(
@@ -125,6 +232,44 @@ async def get_pipeline(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
+    """Get the current status and details of a specific pipeline run.
+
+    **Authentication:** Required — Bearer token in `Authorization` header.
+
+    **Path Parameters:**
+    - `pipeline_id` (UUID, required): The pipeline's unique identifier.
+
+    **Response (200):**
+    ```json
+    {
+      "data": {
+        "id": "uuid",
+        "dataset_id": "uuid",
+        "question": "What drove revenue growth in Q4?",
+        "complexity": "moderate",
+        "execution_plan": "deep_dive",
+        "status": "running",
+        "started_at": "2025-01-15T10:30:01Z",
+        "agents": [
+          {"name": "data_explorer", "tier": 1, "status": "completed", "duration_ms": 4500},
+          {"name": "hypothesis_generator", "tier": 2, "status": "running"}
+        ],
+        "created_at": "2025-01-15T10:30:00Z"
+      }
+    }
+    ```
+
+    **Errors:**
+    - `401 Unauthorized`: Access token is missing or invalid.
+    - `404 Not Found`: Pipeline does not exist or belongs to another user.
+
+    **Frontend Integration:**
+    - Use this for polling-based progress tracking (every 3-5 seconds while `status` is `"running"`).
+    - The `agents` array updates as each agent starts and completes.
+    - When `status` changes to `"completed"`, fetch results from `GET /api/v1/results/{pipeline_id}`.
+    - When `status` is `"failed"`, display `error_message` to the user.
+    - Prefer WebSocket over polling for real-time UX.
+    """
     result = await db.execute(
         select(PipelineRun)
         .where(PipelineRun.id == pipeline_id, PipelineRun.user_id == user.id)
@@ -138,7 +283,11 @@ async def get_pipeline(
 
 @router.post(
     "/{pipeline_id}/cancel",
-    responses={404: {"description": "Pipeline not found"}},
+    summary="Cancel a running pipeline",
+    responses={
+        401: {"description": "Missing or invalid access token"},
+        404: {"description": "Pipeline not found or not owned by user"},
+    },
 )
 @limiter.limit(settings.rate_limit_default)
 async def cancel_pipeline(
@@ -147,6 +296,37 @@ async def cancel_pipeline(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
+    """Cancel a pipeline that is currently queued or running.
+
+    **Authentication:** Required — Bearer token in `Authorization` header.
+
+    **Path Parameters:**
+    - `pipeline_id` (UUID, required): The pipeline's unique identifier.
+
+    **Response (200) — Successfully cancelled:**
+    ```json
+    {
+      "data": {"success": true, "status": "cancelled"}
+    }
+    ```
+
+    **Response (200) — Already finished (no-op):**
+    ```json
+    {
+      "data": {"success": false, "status": "completed", "message": "Pipeline already finished"}
+    }
+    ```
+
+    **Errors:**
+    - `401 Unauthorized`: Access token is missing or invalid.
+    - `404 Not Found`: Pipeline does not exist or belongs to another user.
+
+    **Frontend Integration:**
+    - Cancellation is idempotent — calling it on an already-finished pipeline returns success=false.
+    - After cancellation, the pipeline status becomes `"cancelled"` and no further agent work runs.
+    - The WebSocket connection (if open) will receive a `pipeline_failed` event with cancellation info.
+    - Show a "Cancel" button only when `status` is `"queued"` or `"running"`.
+    """
     result = await db.execute(
         select(PipelineRun).where(PipelineRun.id == pipeline_id, PipelineRun.user_id == user.id)
     )
@@ -166,7 +346,43 @@ async def cancel_pipeline(
 
 @router.websocket("/{pipeline_id}/ws")
 async def pipeline_websocket(websocket: WebSocket, pipeline_id: str, token: str = Query("")):
-    """WebSocket endpoint for real-time pipeline progress events."""
+    """WebSocket endpoint for real-time pipeline progress events.
+
+    **Authentication:** Via `token` query parameter (access token).
+
+    **Connection URL:**
+    ```
+    ws://host/api/v1/pipelines/{pipeline_id}/ws?token=<access_token>
+    ```
+
+    **Connection Flow:**
+    1. Client connects with a valid access token as query parameter.
+    2. Server validates token and verifies pipeline ownership.
+    3. On success, connection is accepted and events stream in real-time.
+    4. Server sends keepalive pings every 30 seconds.
+
+    **Event Types:**
+    ```json
+    {"event": "agent_started", "agent": "data_explorer", "tier": 1, "timestamp": "..."}
+    {"event": "agent_completed", "agent": "data_explorer", "duration_ms": 4500, "timestamp": "..."}
+    {"event": "agent_failed", "agent": "hypothesis_gen", "error": "...", "timestamp": "..."}
+    {"event": "pipeline_completed", "pipeline_id": "...", "confidence_grade": "A", "duration_ms": 95000, "timestamp": "..."}
+    {"event": "pipeline_failed", "pipeline_id": "...", "error": "...", "timestamp": "..."}
+    {"event": "ping", "timestamp": "..."}
+    ```
+
+    **Close Codes:**
+    - `4001`: Authentication failed (missing/invalid/expired token).
+    - `4003`: Forbidden (pipeline belongs to another user).
+    - `4004`: Pipeline not found.
+
+    **Frontend Integration:**
+    - Connect immediately after creating a pipeline.
+    - Use `agent_started`/`agent_completed` events to update a progress stepper UI.
+    - On `pipeline_completed`, close the WebSocket and fetch full results.
+    - Implement reconnection with exponential backoff (1s, 2s, 4s, max 30s).
+    - Handle token expiry: if connection closes with 4001, refresh the token and reconnect.
+    """
     # Authenticate via query param token
     if not token:
         await websocket.close(code=4001, reason="Token required")
