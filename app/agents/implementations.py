@@ -9,12 +9,22 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 from app.agents.base import BaseAgent
 from app.agents.runner import register_agent
 from app.config import settings
 from app.helpers.chart_helper import ChartSpec, generate_charts
+from app.helpers.sql_helpers import execute_query, QueryResult, QueryError
+from app.helpers.analytics_helpers import (
+    compute_summary_stats,
+    compute_time_series,
+    compute_segmentation,
+    compute_top_n,
+    detect_anomalies,
+    SummaryStats,
+)
 from app.helpers.validation_stack import run_validation
 from app.orchestration.context import PipelineContext
 
@@ -58,6 +68,66 @@ class DataExplorerAgent(BaseAgent):
             "ANALYSIS_GOALS": context.question,
         }
 
+    async def run_helpers(self, parsed: dict, context: PipelineContext) -> dict:
+        """Compute summary statistics for dataset columns."""
+        query_metadata: list[dict[str, Any]] = []
+
+        if not context.duckdb_path or not Path(context.duckdb_path).exists():
+            parsed["query_metadata"] = query_metadata
+            return parsed
+
+        try:
+            table_name = _first_table_name(context)
+            tables = (context.schema_profile or {}).get("tables", [])
+            columns: list[str] = []
+            if tables:
+                columns = [
+                    c["name"] for c in tables[0].get("columns", [])
+                ]
+
+            if not columns:
+                parsed["query_metadata"] = query_metadata
+                return parsed
+
+            result = compute_summary_stats(
+                context.duckdb_path, table_name, columns
+            )
+
+            if isinstance(result, QueryError):
+                query_metadata.append({
+                    "query": result.query,
+                    "error": result.message,
+                    "status": "failed",
+                })
+            else:
+                profiles = [asdict(s) for s in result]
+                parsed["computed_profiles"] = profiles
+                # Store a synthetic QueryResult for context tracking
+                synthetic = QueryResult(
+                    columns=["column", "stats"],
+                    rows=[[s.column, "computed"] for s in result],
+                    row_count=len(result),
+                    execution_time_ms=0.0,
+                    query="compute_summary_stats",
+                )
+                context.store_query_result(self.name, synthetic)
+                query_metadata.append({
+                    "query": "compute_summary_stats",
+                    "execution_time_ms": 0.0,
+                    "row_count": len(result),
+                    "status": "success",
+                })
+        except Exception as exc:
+            logger.exception(
+                "Unexpected error in %s run_helpers", self.name
+            )
+            query_metadata.append({
+                "error": str(exc), "status": "error",
+            })
+
+        parsed["query_metadata"] = query_metadata
+        return parsed
+
 
 @register_agent
 class HypothesisAgent(BaseAgent):
@@ -93,6 +163,93 @@ class SourceTieoutAgent(BaseAgent):
             "DATASET_NAME": _first_table_name(context),
         }
 
+    async def run_helpers(self, parsed: dict, context: PipelineContext) -> dict:
+        """Run verification queries: row counts and numeric sums."""
+        query_metadata: list[dict[str, Any]] = []
+
+        if not context.duckdb_path or not Path(context.duckdb_path).exists():
+            parsed["query_metadata"] = query_metadata
+            return parsed
+
+        try:
+            table_name = _first_table_name(context)
+            tables = (context.schema_profile or {}).get("tables", [])
+            columns = tables[0].get("columns", []) if tables else []
+
+            verification_checks: list[dict[str, Any]] = []
+
+            # Row count check
+            count_sql = f'SELECT COUNT(*) FROM "{table_name}"'
+            count_result = execute_query(context.duckdb_path, count_sql)
+            if isinstance(count_result, QueryResult):
+                context.store_query_result(self.name, count_result)
+                row_count = count_result.rows[0][0] if count_result.rows else 0
+                verification_checks.append({
+                    "check": "row_count",
+                    "table": table_name,
+                    "value": row_count,
+                })
+                query_metadata.append({
+                    "query": count_result.query,
+                    "execution_time_ms": count_result.execution_time_ms,
+                    "row_count": count_result.row_count,
+                    "status": "success",
+                })
+            else:
+                query_metadata.append({
+                    "query": count_result.query,
+                    "error": count_result.message,
+                    "status": "failed",
+                })
+
+            # Numeric column sums
+            numeric_types = (
+                "integer", "int", "bigint", "smallint", "tinyint",
+                "float", "double", "real", "decimal", "numeric",
+            )
+            for col in columns:
+                col_type = col.get("type", "").lower()
+                if any(col_type.startswith(t) for t in numeric_types):
+                    col_name = col["name"]
+                    sum_sql = (
+                        f'SELECT SUM("{col_name}") FROM "{table_name}"'
+                    )
+                    sum_result = execute_query(
+                        context.duckdb_path, sum_sql
+                    )
+                    if isinstance(sum_result, QueryResult):
+                        context.store_query_result(self.name, sum_result)
+                        val = sum_result.rows[0][0] if sum_result.rows else None
+                        verification_checks.append({
+                            "check": "numeric_sum",
+                            "column": col_name,
+                            "value": val,
+                        })
+                        query_metadata.append({
+                            "query": sum_result.query,
+                            "execution_time_ms": sum_result.execution_time_ms,
+                            "row_count": sum_result.row_count,
+                            "status": "success",
+                        })
+                    else:
+                        query_metadata.append({
+                            "query": sum_result.query,
+                            "error": sum_result.message,
+                            "status": "failed",
+                        })
+
+            parsed["verification_checks"] = verification_checks
+        except Exception as exc:
+            logger.exception(
+                "Unexpected error in %s run_helpers", self.name
+            )
+            query_metadata.append({
+                "error": str(exc), "status": "error",
+            })
+
+        parsed["query_metadata"] = query_metadata
+        return parsed
+
 
 @register_agent
 class DescriptiveAnalyticsAgent(BaseAgent):
@@ -112,6 +269,116 @@ class DescriptiveAnalyticsAgent(BaseAgent):
             "DATASET": _first_table_name(context),
         }
 
+    async def run_helpers(self, parsed: dict, context: PipelineContext) -> dict:
+        """Compute segmentation and top-N analysis."""
+        query_metadata: list[dict[str, Any]] = []
+
+        if not context.duckdb_path or not Path(context.duckdb_path).exists():
+            parsed["query_metadata"] = query_metadata
+            return parsed
+
+        try:
+            table_name = _first_table_name(context)
+            tables = (context.schema_profile or {}).get("tables", [])
+            columns = tables[0].get("columns", []) if tables else []
+
+            # Identify categorical and metric columns
+            numeric_types = (
+                "integer", "int", "bigint", "smallint", "tinyint",
+                "float", "double", "real", "decimal", "numeric",
+            )
+            categorical_cols = [
+                c["name"] for c in columns
+                if not any(
+                    c.get("type", "").lower().startswith(t)
+                    for t in numeric_types
+                )
+            ]
+            metric_cols = [
+                c["name"] for c in columns
+                if any(
+                    c.get("type", "").lower().startswith(t)
+                    for t in numeric_types
+                )
+            ]
+
+            computed_segments: list[dict[str, Any]] = []
+            computed_top_n: list[dict[str, Any]] = []
+
+            # Segmentation: first categorical × first metric
+            if categorical_cols and metric_cols:
+                seg_result = compute_segmentation(
+                    context.duckdb_path,
+                    table_name,
+                    categorical_cols[0],
+                    metric_cols[0],
+                )
+                if isinstance(seg_result, QueryError):
+                    query_metadata.append({
+                        "query": seg_result.query,
+                        "error": seg_result.message,
+                        "status": "failed",
+                    })
+                else:
+                    computed_segments = [asdict(s) for s in seg_result]
+                    synthetic = QueryResult(
+                        columns=["segment", "sum_value", "mean_value", "count", "share_pct"],
+                        rows=[[s.segment, s.sum_value, s.mean_value, s.count, s.share_pct] for s in seg_result],
+                        row_count=len(seg_result),
+                        execution_time_ms=0.0,
+                        query="compute_segmentation",
+                    )
+                    context.store_query_result(self.name, synthetic)
+                    query_metadata.append({
+                        "query": "compute_segmentation",
+                        "execution_time_ms": 0.0,
+                        "row_count": len(seg_result),
+                        "status": "success",
+                    })
+
+                # Top-N: first categorical × first metric
+                top_result = compute_top_n(
+                    context.duckdb_path,
+                    table_name,
+                    categorical_cols[0],
+                    metric_cols[0],
+                )
+                if isinstance(top_result, QueryError):
+                    query_metadata.append({
+                        "query": top_result.query,
+                        "error": top_result.message,
+                        "status": "failed",
+                    })
+                else:
+                    computed_top_n = [asdict(g) for g in top_result]
+                    synthetic = QueryResult(
+                        columns=["group", "metric_value", "row_count", "share_pct"],
+                        rows=[[g.group, g.metric_value, g.row_count, g.share_pct] for g in top_result],
+                        row_count=len(top_result),
+                        execution_time_ms=0.0,
+                        query="compute_top_n",
+                    )
+                    context.store_query_result(self.name, synthetic)
+                    query_metadata.append({
+                        "query": "compute_top_n",
+                        "execution_time_ms": 0.0,
+                        "row_count": len(top_result),
+                        "status": "success",
+                    })
+
+            parsed["computed_segments"] = computed_segments
+            parsed["computed_top_n"] = computed_top_n
+        except Exception as exc:
+            logger.exception(
+                "Unexpected error in %s run_helpers", self.name
+            )
+            query_metadata.append({
+                "error": str(exc), "status": "error",
+            })
+
+        parsed["query_metadata"] = query_metadata
+        return parsed
+
 
 @register_agent
 class OvertimeTrendAgent(BaseAgent):
@@ -128,6 +395,121 @@ class OvertimeTrendAgent(BaseAgent):
             "SCHEMA": _schema_summary(context),
             "DATASET": _first_table_name(context),
         }
+
+    async def run_helpers(self, parsed: dict, context: PipelineContext) -> dict:
+        """Compute time series and detect anomalies."""
+        query_metadata: list[dict[str, Any]] = []
+
+        if not context.duckdb_path or not Path(context.duckdb_path).exists():
+            parsed["query_metadata"] = query_metadata
+            return parsed
+
+        try:
+            table_name = _first_table_name(context)
+            tables = (context.schema_profile or {}).get("tables", [])
+            columns = tables[0].get("columns", []) if tables else []
+
+            # Identify date and metric columns
+            date_types = ("date", "timestamp", "time")
+            numeric_types = (
+                "integer", "int", "bigint", "smallint", "tinyint",
+                "float", "double", "real", "decimal", "numeric",
+            )
+            date_cols = [
+                c["name"] for c in columns
+                if any(
+                    c.get("type", "").lower().startswith(t)
+                    for t in date_types
+                )
+            ]
+            metric_cols = [
+                c["name"] for c in columns
+                if any(
+                    c.get("type", "").lower().startswith(t)
+                    for t in numeric_types
+                )
+            ]
+
+            computed_time_series: list[dict[str, Any]] = []
+            computed_anomalies: list[dict[str, Any]] = []
+
+            if date_cols and metric_cols:
+                date_col = date_cols[0]
+                metric_col = metric_cols[0]
+
+                # Time series (monthly)
+                ts_result = compute_time_series(
+                    context.duckdb_path,
+                    table_name,
+                    date_col,
+                    metric_col,
+                    "month",
+                )
+                if isinstance(ts_result, QueryError):
+                    query_metadata.append({
+                        "query": ts_result.query,
+                        "error": ts_result.message,
+                        "status": "failed",
+                    })
+                else:
+                    computed_time_series = [asdict(p) for p in ts_result]
+                    synthetic = QueryResult(
+                        columns=["period", "value", "row_count"],
+                        rows=[[p.period, p.value, p.row_count] for p in ts_result],
+                        row_count=len(ts_result),
+                        execution_time_ms=0.0,
+                        query="compute_time_series",
+                    )
+                    context.store_query_result(self.name, synthetic)
+                    query_metadata.append({
+                        "query": "compute_time_series",
+                        "execution_time_ms": 0.0,
+                        "row_count": len(ts_result),
+                        "status": "success",
+                    })
+
+                # Anomaly detection
+                anomaly_result = detect_anomalies(
+                    context.duckdb_path,
+                    table_name,
+                    date_col,
+                    metric_col,
+                )
+                if isinstance(anomaly_result, QueryError):
+                    query_metadata.append({
+                        "query": anomaly_result.query,
+                        "error": anomaly_result.message,
+                        "status": "failed",
+                    })
+                else:
+                    computed_anomalies = [asdict(a) for a in anomaly_result]
+                    synthetic = QueryResult(
+                        columns=["date", "actual", "expected", "deviation_sigma", "direction"],
+                        rows=[[a.date, a.actual, a.expected, a.deviation_sigma, a.direction] for a in anomaly_result],
+                        row_count=len(anomaly_result),
+                        execution_time_ms=0.0,
+                        query="detect_anomalies",
+                    )
+                    context.store_query_result(self.name, synthetic)
+                    query_metadata.append({
+                        "query": "detect_anomalies",
+                        "execution_time_ms": 0.0,
+                        "row_count": len(anomaly_result),
+                        "status": "success",
+                    })
+
+            parsed["computed_time_series"] = computed_time_series
+            parsed["computed_anomalies"] = computed_anomalies
+        except Exception as exc:
+            logger.exception(
+                "Unexpected error in %s run_helpers", self.name
+            )
+            query_metadata.append({
+                "error": str(exc), "status": "error",
+            })
+
+        parsed["query_metadata"] = query_metadata
+        return parsed
 
 
 @register_agent
@@ -146,6 +528,60 @@ class RootCauseInvestigatorAgent(BaseAgent):
             "ANALYSIS_RESULTS": str(context.get_agent_output("descriptive-analytics") or ""),
             "DATASET": _first_table_name(context),
         }
+
+    async def run_helpers(self, parsed: dict, context: PipelineContext) -> dict:
+        """Execute drill-down SQL queries from LLM output."""
+        query_metadata: list[dict[str, Any]] = []
+
+        if not context.duckdb_path or not Path(context.duckdb_path).exists():
+            parsed["query_metadata"] = query_metadata
+            return parsed
+
+        try:
+            # Extract SQL queries from the LLM's parsed output
+            queries = parsed.get("queries", [])
+            drill_down_results: list[dict[str, Any]] = []
+
+            for sql in queries:
+                if not isinstance(sql, str) or not sql.strip():
+                    continue
+                result = execute_query(context.duckdb_path, sql)
+                if isinstance(result, QueryResult):
+                    context.store_query_result(self.name, result)
+                    drill_down_results.append({
+                        "query": result.query,
+                        "columns": result.columns,
+                        "rows": result.rows,
+                        "row_count": result.row_count,
+                    })
+                    query_metadata.append({
+                        "query": result.query,
+                        "execution_time_ms": result.execution_time_ms,
+                        "row_count": result.row_count,
+                        "status": "success",
+                    })
+                else:
+                    drill_down_results.append({
+                        "query": result.query,
+                        "error": result.message,
+                    })
+                    query_metadata.append({
+                        "query": result.query,
+                        "error": result.message,
+                        "status": "failed",
+                    })
+
+            parsed["drill_down_results"] = drill_down_results
+        except Exception as exc:
+            logger.exception(
+                "Unexpected error in %s run_helpers", self.name
+            )
+            query_metadata.append({
+                "error": str(exc), "status": "error",
+            })
+
+        parsed["query_metadata"] = query_metadata
+        return parsed
 
 
 @register_agent
@@ -207,10 +643,48 @@ class ChartMakerAgent(BaseAgent):
         }
 
     async def run_helpers(self, parsed: dict, context: PipelineContext) -> dict:
-        """Generate chart images from LLM-provided chart specifications."""
+        """Execute data queries and generate chart images."""
+        query_metadata: list[dict[str, Any]] = []
+
+        # Execute data queries if present in LLM output
+        if (
+            context.duckdb_path
+            and Path(context.duckdb_path).exists()
+            and parsed.get("data_queries")
+            and isinstance(parsed["data_queries"], list)
+        ):
+            try:
+                for sql in parsed["data_queries"]:
+                    if not isinstance(sql, str) or not sql.strip():
+                        continue
+                    result = execute_query(context.duckdb_path, sql)
+                    if isinstance(result, QueryResult):
+                        context.store_query_result(self.name, result)
+                        query_metadata.append({
+                            "query": result.query,
+                            "execution_time_ms": result.execution_time_ms,
+                            "row_count": result.row_count,
+                            "status": "success",
+                        })
+                    else:
+                        query_metadata.append({
+                            "query": result.query,
+                            "error": result.message,
+                            "status": "failed",
+                        })
+            except Exception as exc:
+                logger.exception(
+                    "Data query execution failed in %s", self.name
+                )
+                query_metadata.append({
+                    "error": str(exc), "status": "error",
+                })
+
+        # Generate charts from LLM-provided specs
         chart_dicts = parsed.get("charts", [])
         if not chart_dicts or not isinstance(chart_dicts, list):
             logger.info("ChartMakerAgent: no chart specs found in LLM output")
+            parsed["query_metadata"] = query_metadata
             return parsed
 
         try:
@@ -244,6 +718,7 @@ class ChartMakerAgent(BaseAgent):
             logger.exception("Chart generation failed in ChartMakerAgent")
             parsed["generated_charts"] = []
 
+        parsed["query_metadata"] = query_metadata
         return parsed
 
 
