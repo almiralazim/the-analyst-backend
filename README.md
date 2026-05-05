@@ -20,8 +20,8 @@ A production-ready backend that accepts CSV/Excel uploads, runs a 10-agent analy
 
 ```bash
 # Clone the repository
-git clone https://github.com/<org>/ai-analyst-backend.git
-cd ai-analyst-backend
+git clone https://github.com/<org>/the-analyst-backend.git
+cd the-analyst-backend
 
 # Copy environment file and configure
 cp .env.example .env
@@ -228,7 +228,7 @@ pytest tests/ -v --cov=app --cov-report=term-missing
 ## Project Structure
 
 ```text
-ai-analyst-backend/
+the-analyst-backend/
 ├── main.py                        # FastAPI app entry point
 ├── entrypoint.sh                  # Docker entrypoint (migrations + seed + server)
 ├── app/

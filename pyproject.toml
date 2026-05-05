@@ -1,5 +1,5 @@
 [project]
-name = "ai-analyst-backend"
+name = "the-analyst-backend"
 version = "0.1.0"
 description = "The Analyst Platform — Backend API, Orchestration, and Agent Pipeline"
 requires-python = ">=3.11"
@@ -29,7 +29,7 @@ dependencies = [
     "google-genai>=1.0.0",
     "groq>=0.11.0",
 
-    # Data processing (ported from ai-analyst)
+    # Data processing (ported from the-analyst)
     "pandas>=2.2.0",
     "duckdb>=1.1.0",
     "openpyxl>=3.1.0",
@@ -38,11 +38,11 @@ dependencies = [
     # SQL parsing and validation
     "sqlglot>=26.0.0",
 
-    # Charts (ported from ai-analyst)
+    # Charts (ported from the-analyst)
     "matplotlib>=3.9.0",
     "seaborn>=0.13.0",
 
-    # Statistics (ported from ai-analyst)
+    # Statistics (ported from the-analyst)
     "scipy>=1.13.0",
     "numpy>=1.26.0",
 
