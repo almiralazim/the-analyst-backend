@@ -32,7 +32,6 @@ async def execute_pipeline(
     context: PipelineContext,
     agent_executor: Callable,
     on_progress: ProgressCallback | None = None,
-    pipeline_timeout: int | None = None,
 ) -> PipelineContext:
     """Execute a pipeline by running agents tier-by-tier.
 
@@ -41,11 +40,8 @@ async def execute_pipeline(
         context: Shared pipeline context.
         agent_executor: Async callable(agent_name, context) -> dict.
         on_progress: Optional callback for WebSocket progress events.
-        pipeline_timeout: Max seconds for the entire pipeline. Defaults to
-            settings.pipeline_timeout_seconds (600).
     """
-    if pipeline_timeout is None:
-        pipeline_timeout = settings.pipeline_timeout_seconds
+    pipeline_timeout = settings.pipeline_timeout_seconds
 
     tiers = resolve_tiers(agents)
     total_agents = sum(len(t) for t in tiers)
@@ -59,10 +55,10 @@ async def execute_pipeline(
     })
 
     try:
-        await asyncio.wait_for(
-            _execute_tiers(tiers, context, agent_executor, on_progress),
-            timeout=pipeline_timeout,
-        )
+        async with asyncio.timeout(pipeline_timeout):
+            await _execute_tiers(
+                tiers, context, agent_executor, on_progress,
+            )
     except asyncio.TimeoutError:
         await _emit(on_progress, {
             "event": "pipeline_failed",
@@ -101,9 +97,10 @@ async def _execute_tiers(
         # Run all agents in this tier concurrently
         tasks = []
         for agent in tier_agents:
-            timeout = agent.timeout_seconds or settings.agent_default_timeout_seconds
             tasks.append(
-                _run_single_agent(agent, context, agent_executor, on_progress, timeout=timeout)
+                _run_single_agent(
+                    agent, context, agent_executor, on_progress,
+                )
             )
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -141,9 +138,8 @@ async def _run_single_agent(
     context: PipelineContext,
     agent_executor: Callable,
     on_progress: ProgressCallback | None,
-    timeout: int = 300,
 ) -> dict:
-    """Run a single agent with timing, progress events, and a per-agent timeout."""
+    """Run a single agent with timing, progress events, and timeout."""
     await _emit(on_progress, {
         "event": "agent_started",
         "agent": agent.name,
@@ -151,12 +147,14 @@ async def _run_single_agent(
         "timestamp": _now(),
     })
 
+    agent_timeout = (
+        agent.timeout_seconds
+        or settings.agent_default_timeout_seconds
+    )
     start = time.monotonic()
     try:
-        result = await asyncio.wait_for(
-            agent_executor(agent.name, context),
-            timeout=timeout,
-        )
+        async with asyncio.timeout(agent_timeout):
+            result = await agent_executor(agent.name, context)
     except asyncio.TimeoutError:
         await _emit(on_progress, {
             "event": "agent_failed",
@@ -167,8 +165,9 @@ async def _run_single_agent(
             "timestamp": _now(),
         })
         if agent.is_critical:
-            raise PipelineError(agent.name, "Agent timed out", agent.tier)
-        # For non-critical agents, return the exception so the tier loop can handle it
+            raise PipelineError(
+                agent.name, "Agent timed out", agent.tier,
+            )
         return {}
 
     duration_ms = int((time.monotonic() - start) * 1000)

@@ -107,7 +107,7 @@ class BaseAgent(ABC):
         except json.JSONDecodeError:
             return {"raw_text": response.content, "parsed": False}
 
-    async def run_helpers(self, parsed: dict, context: PipelineContext) -> dict:
+    def run_helpers(self, parsed: dict, context: PipelineContext) -> dict:
         """Run helper modules on the parsed LLM output.
 
         Override in subclasses to call specific helpers (chart generation,
