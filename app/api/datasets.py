@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.cache import cache_delete_pattern, cache_get, cache_set, make_cache_key
 from app.config import settings
 from app.database import get_db
 from app.models.dataset import Dataset
@@ -81,9 +82,14 @@ def _validate_upload_files(files: list[UploadFile]) -> None:
 @limiter.limit(settings.rate_limit_heavy)
 async def upload_dataset(
     request: Request,
-    files: list[UploadFile] = File(..., description="Data files to upload (.csv, .tsv, .xlsx, .xls)"),
-    name: str = Form(..., description="Human-readable dataset name"),
-    description: str = Form("", description="Optional description of the dataset"),
+    files: Annotated[
+        list[UploadFile],
+        File(description="Data files to upload"),
+    ],
+    name: Annotated[str, Form(description="Dataset name")],
+    description: Annotated[
+        str, Form(description="Optional description"),
+    ] = "",
     user: Annotated[User, Depends(get_current_user)] = None,
     db: Annotated[AsyncSession, Depends(get_db)] = None,
 ):
@@ -324,13 +330,25 @@ async def get_dataset(
     - Check `status` field: only datasets with `status: "ready"` can be used for pipelines.
     - If `status` is `"error"`, display `error_message` to explain what went wrong during profiling.
     """
+    # Check cache
+    cache_key = make_cache_key("dataset", str(dataset_id), "detail")
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     result = await db.execute(
         select(Dataset).where(Dataset.id == dataset_id, Dataset.user_id == user.id)
     )
     dataset = result.scalar_one_or_none()
     if not dataset:
         raise HTTPException(status_code=404, detail={"code": "NOT_FOUND", "message": _DATASET_NOT_FOUND})
-    return ApiResponse(data=DatasetResponse.model_validate(dataset))
+
+    response = ApiResponse(data=DatasetResponse.model_validate(dataset))
+
+    # Cache for 5 minutes
+    await cache_set(cache_key, response.model_dump(mode="json", exclude_none=True), ttl_seconds=300)
+
+    return response
 
 
 @router.get(
@@ -473,6 +491,9 @@ async def delete_dataset(
     storage_dir = settings.storage_path / str(dataset_id)
     if storage_dir.exists():
         shutil.rmtree(storage_dir)
+
+    # Invalidate cache
+    await cache_delete_pattern(make_cache_key("dataset", str(dataset_id), "*"))
 
     await db.delete(dataset)
     return {"data": {"success": True}}

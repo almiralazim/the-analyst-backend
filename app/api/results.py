@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.cache import cache_get, cache_set, make_cache_key
 from app.config import settings
 from app.database import get_db
 from app.models.dataset import Dataset
@@ -139,6 +140,12 @@ async def get_results(
     """
     pipeline, results = await _get_pipeline_with_results(pipeline_id, user.id, db)
 
+    # Check cache for completed pipelines
+    cache_key = make_cache_key("results", str(pipeline_id))
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     # Get dataset name
     ds_result = await db.execute(select(Dataset).where(Dataset.id == pipeline.dataset_id))
     dataset = ds_result.scalar_one_or_none()
@@ -174,7 +181,7 @@ async def get_results(
     if pipeline.started_at and pipeline.completed_at:
         duration_ms = int((pipeline.completed_at - pipeline.started_at).total_seconds() * 1000)
 
-    return {
+    response = {
         "data": {
             "pipeline_id": str(pipeline.id),
             "question": pipeline.question,
@@ -196,6 +203,12 @@ async def get_results(
             "completed_at": pipeline.completed_at.isoformat() if pipeline.completed_at else None,
         },
     }
+
+    # Cache only completed pipelines (1 hour TTL)
+    if pipeline.status == "completed":
+        await cache_set(cache_key, response, ttl_seconds=3600)
+
+    return response
 
 
 @router.get(
@@ -248,8 +261,21 @@ async def get_findings(
     - The `sources` array lists which tables/columns were used to derive the finding.
     """
     _, results = await _get_pipeline_with_results(pipeline_id, user.id, db)
+
+    # Check cache
+    cache_key = make_cache_key("findings", str(pipeline_id))
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     findings = [r.content for r in results if r.result_type == "finding" and r.content]
-    return {"data": findings}
+    response = {"data": findings}
+
+    # Cache for 1 hour if we have findings
+    if findings:
+        await cache_set(cache_key, response, ttl_seconds=3600)
+
+    return response
 
 
 _CHART_MEDIA_TYPES = {
@@ -484,9 +510,22 @@ async def get_narrative(
     - Returns `null` for `data` if the pipeline hasn't produced a narrative yet.
     """
     _, results = await _get_pipeline_with_results(pipeline_id, user.id, db)
+
+    # Check cache
+    cache_key = make_cache_key("narrative", str(pipeline_id))
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     narrative_results = [r for r in results if r.result_type == "narrative"]
     narrative = narrative_results[0].content if narrative_results else None
-    return {"data": narrative}
+    response = {"data": narrative}
+
+    # Cache for 1 hour if narrative exists
+    if narrative:
+        await cache_set(cache_key, response, ttl_seconds=3600)
+
+    return response
 
 
 @router.get(

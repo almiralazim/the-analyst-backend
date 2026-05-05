@@ -88,6 +88,10 @@ class Settings(BaseSettings):
     rate_limit_default: str = "60/minute"
     rate_limit_heavy: str = "10/minute"
 
+    # Cache
+    llm_cache_enabled: bool = False
+    llm_cache_ttl_seconds: int = 3600
+
     @field_validator("secret_key")
     @classmethod
     def _reject_insecure_secret(cls, v: str) -> str:
