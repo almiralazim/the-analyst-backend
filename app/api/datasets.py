@@ -71,18 +71,19 @@ def _validate_upload_files(files: list[UploadFile]) -> None:
     response_model_exclude_none=True,
     status_code=201,
     summary="Upload a new dataset",
+    response_description="Dataset created and profiled successfully",
     responses={
-        400: {"description": "Invalid file type or too many files"},
-        413: {"description": "File or total upload size exceeds limit"},
+        400: {"description": "Invalid file type or too many files", "content": {"application/json": {"example": {"error": {"code": "VALIDATION_ERROR", "message": "File type .doc not supported. Accepted: .csv, .tsv, .xls, .xlsx"}}}}},
+        413: {"description": "File or total upload size exceeds limit", "content": {"application/json": {"example": {"error": {"code": "PAYLOAD_TOO_LARGE", "message": "sales_data.csv exceeds 500MB limit."}}}}},
         422: {"description": "Validation error (missing name or files)"},
     },
 )
 @limiter.limit(settings.rate_limit_heavy)
 async def upload_dataset(
     request: Request,
-    files: Annotated[list[UploadFile], File()],
-    name: Annotated[str, Form()],
-    description: Annotated[str, Form()] = "",
+    files: list[UploadFile] = File(..., description="Data files to upload (.csv, .tsv, .xlsx, .xls)"),
+    name: str = Form(..., description="Human-readable dataset name"),
+    description: str = Form("", description="Optional description of the dataset"),
     user: Annotated[User, Depends(get_current_user)] = None,
     db: Annotated[AsyncSession, Depends(get_db)] = None,
 ):
@@ -178,10 +179,13 @@ async def upload_dataset(
     dataset.status = "profiling"
     await db.flush()
 
-    # Trigger async profiling (in-process for MVP)
+    # Process files (sync function — run in thread to avoid blocking the event loop)
     from app.services.file_processing import process_dataset_files
+    import asyncio
     try:
-        profile_result = await process_dataset_files(dataset_id, saved_paths, settings.storage_path)
+        profile_result = await asyncio.to_thread(
+            process_dataset_files, dataset_id, saved_paths, settings.storage_path
+        )
         dataset.duckdb_path = profile_result["duckdb_path"]
         dataset.schema_profile = profile_result["schema_profile"]
         dataset.table_count = profile_result["table_count"]
@@ -199,8 +203,9 @@ async def upload_dataset(
     response_model=PaginatedResponse[DatasetListResponse],
     response_model_exclude_none=True,
     summary="List all datasets for the current user",
+    response_description="Paginated list of datasets owned by the authenticated user",
     responses={
-        401: {"description": "Missing or invalid access token"},
+        401: {"description": "Missing or invalid access token", "content": {"application/json": {"example": {"error": {"code": "UNAUTHORIZED", "message": "Could not validate credentials"}}}}},
     },
 )
 @limiter.limit(settings.rate_limit_default)
@@ -268,9 +273,10 @@ async def list_datasets(
     response_model=ApiResponse[DatasetResponse],
     response_model_exclude_none=True,
     summary="Get dataset details",
+    response_description="Full dataset details including schema profile",
     responses={
-        401: {"description": "Missing or invalid access token"},
-        404: {"description": "Dataset not found or not owned by user"},
+        401: {"description": "Missing or invalid access token", "content": {"application/json": {"example": {"error": {"code": "UNAUTHORIZED", "message": "Could not validate credentials"}}}}},
+        404: {"description": "Dataset not found or not owned by user", "content": {"application/json": {"example": {"error": {"code": "NOT_FOUND", "message": "Dataset not found"}}}}},
     },
 )
 @limiter.limit(settings.rate_limit_default)
@@ -332,9 +338,10 @@ async def get_dataset(
     response_model=ApiResponse[TablePreviewResponse],
     response_model_exclude_none=True,
     summary="Preview table data with pagination",
+    response_description="Paginated rows and column names from the specified table",
     responses={
-        401: {"description": "Missing or invalid access token"},
-        404: {"description": "Dataset not found or table does not exist"},
+        401: {"description": "Missing or invalid access token", "content": {"application/json": {"example": {"error": {"code": "UNAUTHORIZED", "message": "Could not validate credentials"}}}}},
+        404: {"description": "Dataset not found or table does not exist", "content": {"application/json": {"example": {"error": {"code": "NOT_FOUND", "message": "Dataset not found"}}}}},
     },
 )
 @limiter.limit(settings.rate_limit_default)
@@ -414,9 +421,10 @@ async def preview_table(
 @router.delete(
     "/{dataset_id}",
     summary="Delete a dataset and its storage",
+    response_description="Dataset deleted successfully",
     responses={
-        401: {"description": "Missing or invalid access token"},
-        404: {"description": "Dataset not found or not owned by user"},
+        401: {"description": "Missing or invalid access token", "content": {"application/json": {"example": {"error": {"code": "UNAUTHORIZED", "message": "Could not validate credentials"}}}}},
+        404: {"description": "Dataset not found or not owned by user", "content": {"application/json": {"example": {"error": {"code": "NOT_FOUND", "message": "Dataset not found"}}}}},
     },
 )
 @limiter.limit(settings.rate_limit_default)

@@ -31,9 +31,10 @@ router = APIRouter(prefix="/knowledge", tags=["knowledge"])
     response_model_exclude_none=True,
     status_code=201,
     summary="Log a correction to improve future analyses",
+    response_description="Correction recorded successfully",
     responses={
-        401: {"description": "Missing or invalid access token"},
-        422: {"description": "Validation error (missing fields, invalid severity/category)"},
+        401: {"description": "Missing or invalid access token", "content": {"application/json": {"example": {"error": {"code": "UNAUTHORIZED", "message": "Could not validate credentials"}}}}},
+        422: {"description": "Validation error (missing fields, invalid severity/category)", "content": {"application/json": {"example": {"detail": [{"loc": ["body", "severity"], "msg": "unexpected value; permitted: 'critical', 'high', 'medium', 'low'", "type": "value_error"}]}}}},
     },
 )
 @limiter.limit(settings.rate_limit_default)
@@ -107,8 +108,9 @@ async def create_correction(
     response_model=PaginatedResponse[CorrectionResponse],
     response_model_exclude_none=True,
     summary="List corrections with optional filters",
+    response_description="Paginated list of corrections with filter metadata",
     responses={
-        401: {"description": "Missing or invalid access token"},
+        401: {"description": "Missing or invalid access token", "content": {"application/json": {"example": {"error": {"code": "UNAUTHORIZED", "message": "Could not validate credentials"}}}}},
     },
 )
 @limiter.limit(settings.rate_limit_default)
@@ -192,9 +194,10 @@ async def list_corrections(
     response_model_exclude_none=True,
     status_code=201,
     summary="Record a learning for the knowledge system",
+    response_description="Learning recorded successfully",
     responses={
-        401: {"description": "Missing or invalid access token"},
-        422: {"description": "Validation error (missing fields, invalid category)"},
+        401: {"description": "Missing or invalid access token", "content": {"application/json": {"example": {"error": {"code": "UNAUTHORIZED", "message": "Could not validate credentials"}}}}},
+        422: {"description": "Validation error (missing fields, invalid category)", "content": {"application/json": {"example": {"detail": [{"loc": ["body", "category"], "msg": "unexpected value; permitted: 'data_patterns', 'query_techniques', 'business_context', ...", "type": "value_error"}]}}}},
     },
 )
 @limiter.limit(settings.rate_limit_default)
@@ -256,8 +259,9 @@ async def create_learning(
     response_model=PaginatedResponse[LearningResponse],
     response_model_exclude_none=True,
     summary="List learnings with optional category filter",
+    response_description="Paginated list of learnings",
     responses={
-        401: {"description": "Missing or invalid access token"},
+        401: {"description": "Missing or invalid access token", "content": {"application/json": {"example": {"error": {"code": "UNAUTHORIZED", "message": "Could not validate credentials"}}}}},
     },
 )
 @limiter.limit(settings.rate_limit_default)

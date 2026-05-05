@@ -37,9 +37,10 @@ router = APIRouter(prefix="/auth", tags=["auth"])
     response_model_exclude_none=True,
     status_code=201,
     summary="Register a new user account",
+    response_description="User created successfully with access and refresh tokens",
     responses={
-        409: {"description": "Email already registered"},
-        422: {"description": "Validation error (invalid email format, password too short)"},
+        409: {"description": "Email already registered", "content": {"application/json": {"example": {"error": {"code": "CONFLICT", "message": "Email already registered"}}}}},
+        422: {"description": "Validation error (invalid email format, password too short)", "content": {"application/json": {"example": {"detail": [{"loc": ["body", "email"], "msg": "value is not a valid email address", "type": "value_error.email"}]}}}},
     },
 )
 @limiter.limit(settings.rate_limit_default)
@@ -108,9 +109,10 @@ async def register(request: Request, body: RegisterRequest, db: AsyncSession = D
     response_model=ApiResponse[AuthResponse],
     response_model_exclude_none=True,
     summary="Authenticate with email and password",
+    response_description="Authentication successful with access and refresh tokens",
     responses={
-        401: {"description": "Invalid email or password"},
-        422: {"description": "Validation error (missing fields)"},
+        401: {"description": "Invalid email or password", "content": {"application/json": {"example": {"error": {"code": "UNAUTHORIZED", "message": "Invalid email or password"}}}}},
+        422: {"description": "Validation error (missing fields)", "content": {"application/json": {"example": {"detail": [{"loc": ["body", "email"], "msg": "field required", "type": "value_error.missing"}]}}}},
     },
 )
 @limiter.limit(settings.rate_limit_default)
@@ -170,9 +172,10 @@ async def login(request: Request, body: LoginRequest, db: AsyncSession = Depends
     response_model=ApiResponse[TokenRefreshResponse],
     response_model_exclude_none=True,
     summary="Refresh an expired access token",
+    response_description="New access token issued successfully",
     responses={
-        401: {"description": "Invalid or expired refresh token"},
-        422: {"description": "Validation error (missing refresh_token)"},
+        401: {"description": "Invalid or expired refresh token", "content": {"application/json": {"example": {"error": {"code": "UNAUTHORIZED", "message": "Invalid refresh token"}}}}},
+        422: {"description": "Validation error (missing refresh_token)", "content": {"application/json": {"example": {"detail": [{"loc": ["body", "refresh_token"], "msg": "field required", "type": "value_error.missing"}]}}}},
     },
 )
 @limiter.limit(settings.rate_limit_default)
@@ -228,8 +231,9 @@ async def refresh(request: Request, body: RefreshRequest, db: AsyncSession = Dep
     response_model=ApiResponse[UserResponse],
     response_model_exclude_none=True,
     summary="Get current user profile",
+    response_description="Current user profile information",
     responses={
-        401: {"description": "Missing or invalid access token"},
+        401: {"description": "Missing or invalid access token", "content": {"application/json": {"example": {"error": {"code": "UNAUTHORIZED", "message": "Could not validate credentials"}}}}},
     },
 )
 @limiter.limit(settings.rate_limit_default)

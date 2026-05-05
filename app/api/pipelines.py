@@ -39,10 +39,11 @@ _background_tasks: set[asyncio.Task] = set()
     response_model_exclude_none=True,
     status_code=201,
     summary="Create and start a new analysis pipeline",
+    response_description="Pipeline created and queued for execution",
     responses={
-        400: {"description": "Dataset not ready for analysis"},
-        404: {"description": "Dataset not found or not owned by user"},
-        422: {"description": "Validation error (question too short/long, invalid plan)"},
+        400: {"description": "Dataset not ready for analysis", "content": {"application/json": {"example": {"error": {"code": "VALIDATION_ERROR", "message": "Dataset is not ready (status: profiling)"}}}}},
+        404: {"description": "Dataset not found or not owned by user", "content": {"application/json": {"example": {"error": {"code": "NOT_FOUND", "message": "Dataset not found"}}}}},
+        422: {"description": "Validation error (question too short/long, invalid plan)", "content": {"application/json": {"example": {"detail": [{"loc": ["body", "question"], "msg": "ensure this value has at least 5 characters", "type": "value_error.any_str.min_length"}]}}}},
     },
 )
 @limiter.limit(settings.rate_limit_heavy)
@@ -142,8 +143,9 @@ async def create_pipeline(
     response_model=PaginatedResponse[PipelineResponse],
     response_model_exclude_none=True,
     summary="List all pipelines for the current user",
+    response_description="Paginated list of pipeline runs with agent status",
     responses={
-        401: {"description": "Missing or invalid access token"},
+        401: {"description": "Missing or invalid access token", "content": {"application/json": {"example": {"error": {"code": "UNAUTHORIZED", "message": "Could not validate credentials"}}}}},
     },
 )
 @limiter.limit(settings.rate_limit_default)
@@ -220,9 +222,10 @@ async def list_pipelines(
     response_model=ApiResponse[PipelineResponse],
     response_model_exclude_none=True,
     summary="Get pipeline status and details",
+    response_description="Pipeline details with current status and per-agent progress",
     responses={
-        401: {"description": "Missing or invalid access token"},
-        404: {"description": "Pipeline not found or not owned by user"},
+        401: {"description": "Missing or invalid access token", "content": {"application/json": {"example": {"error": {"code": "UNAUTHORIZED", "message": "Could not validate credentials"}}}}},
+        404: {"description": "Pipeline not found or not owned by user", "content": {"application/json": {"example": {"error": {"code": "NOT_FOUND", "message": "Pipeline not found"}}}}},
     },
 )
 @limiter.limit(settings.rate_limit_default)
@@ -284,9 +287,10 @@ async def get_pipeline(
 @router.post(
     "/{pipeline_id}/cancel",
     summary="Cancel a running pipeline",
+    response_description="Cancellation result with updated pipeline status",
     responses={
-        401: {"description": "Missing or invalid access token"},
-        404: {"description": "Pipeline not found or not owned by user"},
+        401: {"description": "Missing or invalid access token", "content": {"application/json": {"example": {"error": {"code": "UNAUTHORIZED", "message": "Could not validate credentials"}}}}},
+        404: {"description": "Pipeline not found or not owned by user", "content": {"application/json": {"example": {"error": {"code": "NOT_FOUND", "message": "Pipeline not found"}}}}},
     },
 )
 @limiter.limit(settings.rate_limit_default)

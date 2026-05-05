@@ -49,9 +49,10 @@ async def _get_pipeline_with_results(
 @router.get(
     "/{pipeline_id}",
     summary="Get full analysis results for a pipeline",
+    response_description="Complete analysis results including findings, charts, narrative, and validation",
     responses={
-        401: {"description": "Missing or invalid access token"},
-        404: {"description": "Pipeline not found or not owned by user"},
+        401: {"description": "Missing or invalid access token", "content": {"application/json": {"example": {"error": {"code": "UNAUTHORIZED", "message": "Could not validate credentials"}}}}},
+        404: {"description": "Pipeline not found or not owned by user", "content": {"application/json": {"example": {"error": {"code": "NOT_FOUND", "message": "Pipeline not found"}}}}},
     },
 )
 @limiter.limit(settings.rate_limit_default)
@@ -200,9 +201,10 @@ async def get_results(
 @router.get(
     "/{pipeline_id}/findings",
     summary="Get findings only for a pipeline",
+    response_description="Array of findings (insights) extracted from the analysis",
     responses={
-        401: {"description": "Missing or invalid access token"},
-        404: {"description": "Pipeline not found or not owned by user"},
+        401: {"description": "Missing or invalid access token", "content": {"application/json": {"example": {"error": {"code": "UNAUTHORIZED", "message": "Could not validate credentials"}}}}},
+        404: {"description": "Pipeline not found or not owned by user", "content": {"application/json": {"example": {"error": {"code": "NOT_FOUND", "message": "Pipeline not found"}}}}},
     },
 )
 @limiter.limit(settings.rate_limit_default)
@@ -260,11 +262,12 @@ _CHART_MEDIA_TYPES = {
 @router.get(
     "/{pipeline_id}/charts/{chart_id}",
     summary="Get a chart image in PNG, SVG, or PDF format",
+    response_description="Binary chart image with appropriate Content-Type header",
     responses={
-        400: {"description": "Invalid chart format requested"},
-        401: {"description": "Missing or invalid access token"},
-        404: {"description": "Pipeline or chart not found"},
-        500: {"description": "Chart format conversion failed"},
+        400: {"description": "Invalid chart format requested", "content": {"application/json": {"example": {"error": {"code": "VALIDATION_ERROR", "message": "Format must be one of: png, svg, pdf"}}}}},
+        401: {"description": "Missing or invalid access token", "content": {"application/json": {"example": {"error": {"code": "UNAUTHORIZED", "message": "Could not validate credentials"}}}}},
+        404: {"description": "Pipeline or chart not found", "content": {"application/json": {"example": {"error": {"code": "NOT_FOUND", "message": "Chart not found"}}}}},
+        500: {"description": "Chart format conversion failed", "content": {"application/json": {"example": {"error": {"code": "CONVERSION_ERROR", "message": "Chart format conversion to svg failed: ..."}}}}},
     },
 )
 @limiter.limit(settings.rate_limit_default)
@@ -432,9 +435,10 @@ async def get_chart(
 @router.get(
     "/{pipeline_id}/narrative",
     summary="Get narrative text for a pipeline",
+    response_description="Executive summary, detailed findings, and recommendations",
     responses={
-        401: {"description": "Missing or invalid access token"},
-        404: {"description": "Pipeline not found or not owned by user"},
+        401: {"description": "Missing or invalid access token", "content": {"application/json": {"example": {"error": {"code": "UNAUTHORIZED", "message": "Could not validate credentials"}}}}},
+        404: {"description": "Pipeline not found or not owned by user", "content": {"application/json": {"example": {"error": {"code": "NOT_FOUND", "message": "Pipeline not found"}}}}},
     },
 )
 @limiter.limit(settings.rate_limit_default)
@@ -488,11 +492,12 @@ async def get_narrative(
 @router.get(
     "/{pipeline_id}/export/{fmt}",
     summary="Export analysis results as HTML, PDF, or DOCX",
+    response_description="Downloadable document file with Content-Disposition header",
     responses={
-        400: {"description": "Invalid export format"},
-        401: {"description": "Missing or invalid access token"},
-        404: {"description": "Pipeline not found or not owned by user"},
-        503: {"description": "Export dependency unavailable (e.g., WeasyPrint for PDF)"},
+        400: {"description": "Invalid export format", "content": {"application/json": {"example": {"error": {"code": "VALIDATION_ERROR", "message": "Format must be one of: html, pdf, docx"}}}}},
+        401: {"description": "Missing or invalid access token", "content": {"application/json": {"example": {"error": {"code": "UNAUTHORIZED", "message": "Could not validate credentials"}}}}},
+        404: {"description": "Pipeline not found or not owned by user", "content": {"application/json": {"example": {"error": {"code": "NOT_FOUND", "message": "Pipeline not found"}}}}},
+        503: {"description": "Export dependency unavailable (e.g., WeasyPrint for PDF)", "content": {"application/json": {"example": {"error": {"code": "DEPENDENCY_UNAVAILABLE", "message": "PDF export requires WeasyPrint, which is not installed."}}}}},
     },
 )
 @limiter.limit(settings.rate_limit_default)
