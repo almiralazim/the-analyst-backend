@@ -108,13 +108,16 @@ class BaseAgent(ABC):
         except json.JSONDecodeError:
             return {"raw_text": response.content, "parsed": False}
 
-    def run_helpers(self, parsed: dict, context: PipelineContext) -> dict:
+    async def run_helpers(self, parsed: dict, context: PipelineContext) -> dict:
         """Run helper modules on the parsed LLM output.
 
         Override in subclasses to call specific helpers (chart generation,
         validation, SQL execution, etc.).
+
+        This method is async so subclasses can use await without changing
+        the call signature in execute().
         """
-        return parsed
+        return parsed  # noqa: RUF029 — async required for subclass overrides
 
     async def _call_llm_with_cache(self, prompt: str) -> LLMResponse:
         """Call LLM with optional response caching for development use."""

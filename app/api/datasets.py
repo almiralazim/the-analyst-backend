@@ -200,6 +200,11 @@ async def upload_dataset(
     except Exception as e:
         dataset.status = "error"
         dataset.error_message = str(e)
+        # Clean up partial files on failure
+        import shutil
+        storage_dir = settings.storage_path / str(dataset_id)
+        if storage_dir.exists():
+            shutil.rmtree(storage_dir, ignore_errors=True)
 
     return ApiResponse(data=DatasetResponse.model_validate(dataset))
 

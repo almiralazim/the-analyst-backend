@@ -17,6 +17,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.database import get_db, async_session_factory
+from app.llm.model_registry import ModelRegistry
 from app.models.dataset import Dataset
 from app.models.pipeline import AgentExecution, PipelineRun
 from app.models.user import User
@@ -112,19 +113,57 @@ async def create_pipeline(
             detail={"code": "VALIDATION_ERROR", "message": f"Dataset is not ready (status: {dataset.status})"},
         )
 
+    # Validate model selection
+    registry = ModelRegistry()
+    if not registry.is_valid_selection(body.model):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "VALIDATION_ERROR",
+                "message": (
+                    f"Invalid model selection '{body.model}'. "
+                    "Use 'auto', a provider name (anthropic, openai, gemini, groq), "
+                    "or a specific model ID."
+                ),
+            },
+        )
+
+    # Check provider availability
+    if body.model != "auto":
+        provider_to_check = body.model
+        if body.model not in registry.all_provider_names:
+            # It's a model ID — resolve to provider
+            provider_to_check = registry.get_provider_for_model(body.model)
+
+        if provider_to_check and not registry.is_provider_available(provider_to_check):
+            available = [
+                p.name for p in registry.get_available_providers()
+            ]
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "PROVIDER_UNAVAILABLE",
+                    "message": (
+                        f"Provider '{provider_to_check}' is not available. "
+                        f"Configured providers: {available}"
+                    ),
+                },
+            )
+
     # Create pipeline run
     pipeline = PipelineRun(
         user_id=user.id,
         dataset_id=body.dataset_id,
         question=body.question,
         execution_plan=body.plan,
+        model_selection=body.model,
         status="queued",
     )
     db.add(pipeline)
     await db.flush()
 
     # Launch pipeline execution in background
-    task = asyncio.create_task(_run_pipeline(pipeline.id, dataset, user.id, body.question, body.plan))
+    task = asyncio.create_task(_run_pipeline(pipeline.id, dataset, user.id, body.question, body.plan, body.model))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
@@ -467,13 +506,16 @@ async def _run_pipeline(
     user_id: uuid.UUID,
     question: str,
     plan: str,
+    model_selection: str = "auto",
 ) -> None:
     """Background task that executes the full agent pipeline."""
     from app.agents.runner import execute_agent
     from app.orchestration.context import PipelineContext
     from app.orchestration.dag_resolver import filter_agents_by_plan
     from app.orchestration.executor import execute_pipeline, PipelineError
-    from app.orchestration.registry import load_registry
+    from app.orchestration.registry import load_registry, get_agent_tiers
+    from app.llm.model_router import ModelRouter
+    from app.llm.factory import get_llm_provider
     from app.services.knowledge_bootstrap import bootstrap_context
 
     async with async_session_factory() as db:
@@ -492,6 +534,15 @@ async def _run_pipeline(
             # Load and filter agents
             all_agents = load_registry()
             agents = filter_agents_by_plan(all_agents, plan)
+
+            # Resolve model assignments before execution
+            agent_tiers = get_agent_tiers()
+            router = ModelRouter()
+            agent_names = [a.name for a in agents]
+            assignments = router.resolve_assignments(
+                agent_names, model_selection, agent_tiers
+            )
+            assignment_map = {a.agent_name: a for a in assignments}
 
             # Create agent execution records
             for agent in agents:
@@ -521,8 +572,25 @@ async def _run_pipeline(
                         error=event.get("error"),
                     )
 
+            # Build per-agent LLM provider factory
+            def agent_llm_factory(agent_name: str):
+                """Return the LLM provider for a specific agent."""
+                assignment = assignment_map.get(agent_name)
+                if assignment:
+                    return get_llm_provider(
+                        assignment.provider, model=assignment.model
+                    )
+                return get_llm_provider()
+
+            # Execute pipeline with model-aware agent runner
+            async def execute_agent_with_model(agent_name: str, ctx: PipelineContext) -> dict:
+                from app.agents.runner import get_agent
+                llm = agent_llm_factory(agent_name)
+                agent_instance = get_agent(agent_name, llm=llm)
+                return await agent_instance.execute(ctx)
+
             # Execute pipeline
-            context = await execute_pipeline(agents, context, execute_agent, on_progress)
+            context = await execute_pipeline(agents, context, execute_agent_with_model, on_progress)
 
             # Store results
             from app.services.result_builder import build_and_store_results

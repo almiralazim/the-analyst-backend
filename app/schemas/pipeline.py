@@ -13,6 +13,7 @@ class CreatePipelineRequest(BaseModel):
     dataset_id: uuid.UUID
     question: str = Field(..., min_length=5, max_length=2000)
     plan: Literal["deep_dive", "full_presentation", "validate_only"] = "deep_dive"
+    model: str = "auto"
 
 
 class AgentStatusResponse(BaseModel):
