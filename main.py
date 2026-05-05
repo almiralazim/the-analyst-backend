@@ -246,6 +246,7 @@ from app.api.datasets import router as datasets_router
 from app.api.pipelines import router as pipelines_router
 from app.api.results import router as results_router
 from app.api.knowledge import router as knowledge_router
+from app.api.models import router as models_router
 
 _API_PREFIX = "/api/v1"
 
@@ -254,6 +255,7 @@ app.include_router(datasets_router, prefix=_API_PREFIX)
 app.include_router(pipelines_router, prefix=_API_PREFIX)
 app.include_router(results_router, prefix=_API_PREFIX)
 app.include_router(knowledge_router, prefix=_API_PREFIX)
+app.include_router(models_router, prefix=_API_PREFIX)
 
 
 # ---------------------------------------------------------------------------
