@@ -11,7 +11,7 @@ from app.config import settings
 from app.database import Base
 
 # Import all models so Alembic sees them
-from app.models import *  # noqa: F401, F403
+from app.models import dataset, knowledge, pipeline, result, user  # noqa: F401
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)
