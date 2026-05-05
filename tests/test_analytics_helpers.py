@@ -56,26 +56,26 @@ def orders_db(tmp_path: Path) -> str:
     """)
     conn.execute("""
         INSERT INTO orders VALUES
-        (1,  'Alice',   100.0, '2024-01-01', 'Electronics'),
-        (2,  'Bob',     200.0, '2024-01-02', 'Clothing'),
-        (3,  'Alice',   150.0, '2024-01-03', 'Electronics'),
-        (4,  'Charlie', 300.0, '2024-01-04', 'Food'),
-        (5,  'Bob',      50.0, '2024-01-05', 'Clothing'),
-        (6,  'Alice',    75.0, '2024-01-06', 'Food'),
-        (7,  'Dave',    400.0, '2024-01-07', 'Electronics'),
-        (8,  'Eve',     120.0, '2024-01-08', 'Clothing'),
-        (9,  'Charlie', 180.0, '2024-01-09', 'Food'),
-        (10, 'Bob',     220.0, '2024-01-10', 'Electronics'),
-        (11, 'Alice',    90.0, '2024-01-11', 'Clothing'),
-        (12, 'Dave',    350.0, '2024-01-12', 'Electronics'),
-        (13, 'Eve',      60.0, '2024-01-13', 'Food'),
-        (14, 'Charlie', 500.0, '2024-01-14', 'Electronics'),
-        (15, 'Bob',     130.0, '2024-01-15', 'Clothing'),
-        (16, 'Alice',   275.0, '2024-01-16', 'Food'),
-        (17, 'Dave',    190.0, '2024-01-17', 'Electronics'),
-        (18, 'Eve',     310.0, '2024-01-18', 'Clothing'),
-        (19, 'Charlie', 140.0, '2024-01-19', 'Food'),
-        (20, 'Bob',      85.0, '2024-01-20', 'Electronics')
+        (1,  'Alice',   100.0, '2025-01-01', 'Electronics'),
+        (2,  'Bob',     200.0, '2025-01-02', 'Clothing'),
+        (3,  'Alice',   150.0, '2025-01-03', 'Electronics'),
+        (4,  'Charlie', 300.0, '2025-01-04', 'Food'),
+        (5,  'Bob',      50.0, '2025-01-05', 'Clothing'),
+        (6,  'Alice',    75.0, '2025-01-06', 'Food'),
+        (7,  'Dave',    400.0, '2025-01-07', 'Electronics'),
+        (8,  'Eve',     120.0, '2025-01-08', 'Clothing'),
+        (9,  'Charlie', 180.0, '2025-01-09', 'Food'),
+        (10, 'Bob',     220.0, '2025-01-10', 'Electronics'),
+        (11, 'Alice',    90.0, '2025-01-11', 'Clothing'),
+        (12, 'Dave',    350.0, '2025-01-12', 'Electronics'),
+        (13, 'Eve',      60.0, '2025-01-13', 'Food'),
+        (14, 'Charlie', 500.0, '2025-01-14', 'Electronics'),
+        (15, 'Bob',     130.0, '2025-01-15', 'Clothing'),
+        (16, 'Alice',   275.0, '2025-01-16', 'Food'),
+        (17, 'Dave',    190.0, '2025-01-17', 'Electronics'),
+        (18, 'Eve',     310.0, '2025-01-18', 'Clothing'),
+        (19, 'Charlie', 140.0, '2025-01-19', 'Food'),
+        (20, 'Bob',      85.0, '2025-01-20', 'Electronics')
     """)
     conn.close()
     return db_path
@@ -136,8 +136,8 @@ class TestComputeSummaryStats:
         stats = result[0]
 
         # Known values from the test data
-        assert stats.min_val == 50.0
-        assert stats.max_val == 500.0
+        assert stats.min_val == pytest.approx(50.0)
+        assert stats.max_val == pytest.approx(500.0)
         assert stats.count == 20
         # Mean of all amounts
         total = sum([
@@ -236,7 +236,7 @@ class TestComputeTimeSeries:
             orders_db, "orders", "order_date", "amount", "month"
         )
         assert isinstance(result, list)
-        # All data is in January 2024
+        # All data is in January 2025
         assert len(result) == 1
         assert result[0].row_count == 20
 
@@ -443,7 +443,7 @@ class TestDetectAnomalies:
         for i in range(5):
             conn.execute(
                 "INSERT INTO small_ts VALUES (?, ?)",
-                [f"2024-01-{i+1:02d}", float(i * 10)],
+                [f"2025-01-{i+1:02d}", float(i * 10)],
             )
         conn.close()
 
@@ -459,7 +459,7 @@ class TestDetectAnomalies:
         for i in range(15):
             conn.execute(
                 "INSERT INTO constant_ts VALUES (?, ?)",
-                [f"2024-01-{i+1:02d}", 100.0],
+                [f"2025-01-{i+1:02d}", 100.0],
             )
         conn.close()
 
@@ -568,4 +568,4 @@ class TestConstants:
         assert MIN_CORRELATION_PAIRS == 3
 
     def test_anomaly_sigma_threshold(self):
-        assert ANOMALY_SIGMA_THRESHOLD == 2.0
+        assert ANOMALY_SIGMA_THRESHOLD == pytest.approx(2.0)

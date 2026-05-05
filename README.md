@@ -360,10 +360,11 @@ All configuration is via environment variables (or `.env` file). See [.env.examp
 
 ## Documentation
 
-- **Swagger UI**: [http://localhost:8000/docs](http://localhost:8000/docs)
-- **ReDoc**: [http://localhost:8000/redoc](http://localhost:8000/redoc)
-- **API Reference**: [docs/API_REFERENCE.md](docs/API_REFERENCE.md)
-- **Contributing**: [CONTRIBUTING.md](CONTRIBUTING.md)
+- **Getting Started**: [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) — End-to-end walkthrough
+- **API Reference**: [docs/API_REFERENCE.md](docs/API_REFERENCE.md) — Full endpoint documentation
+- **Swagger UI**: [http://localhost:8000/docs](http://localhost:8000/docs) — Interactive API explorer
+- **ReDoc**: [http://localhost:8000/redoc](http://localhost:8000/redoc) — Readable API docs
+- **Contributing**: [CONTRIBUTING.md](CONTRIBUTING.md) — Dev setup and PR process
 
 ## License
 
