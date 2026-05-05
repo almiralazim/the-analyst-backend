@@ -30,6 +30,8 @@ from app.orchestration.context import PipelineContext
 
 logger = logging.getLogger(__name__)
 
+_LOG_HELPERS_ERROR = "Unexpected error in %s run_helpers"
+
 
 @register_agent
 class QuestionFramingAgent(BaseAgent):
@@ -68,7 +70,9 @@ class DataExplorerAgent(BaseAgent):
             "ANALYSIS_GOALS": context.question,
         }
 
-    async def run_helpers(self, parsed: dict, context: PipelineContext) -> dict:
+    async def run_helpers(
+        self, parsed: dict, context: PipelineContext,
+    ) -> dict:
         """Compute summary statistics for dataset columns."""
         query_metadata: list[dict[str, Any]] = []
 
@@ -119,7 +123,7 @@ class DataExplorerAgent(BaseAgent):
                 })
         except Exception as exc:
             logger.exception(
-                "Unexpected error in %s run_helpers", self.name
+                _LOG_HELPERS_ERROR, self.name
             )
             query_metadata.append({
                 "error": str(exc), "status": "error",
@@ -163,7 +167,82 @@ class SourceTieoutAgent(BaseAgent):
             "DATASET_NAME": _first_table_name(context),
         }
 
-    async def run_helpers(self, parsed: dict, context: PipelineContext) -> dict:
+    def _verify_row_count(
+        self,
+        context: PipelineContext,
+        table_name: str,
+        checks: list[dict[str, Any]],
+        metadata: list[dict[str, Any]],
+    ) -> None:
+        count_sql = f'SELECT COUNT(*) FROM "{table_name}"'
+        result = execute_query(context.duckdb_path, count_sql)
+        if isinstance(result, QueryResult):
+            context.store_query_result(self.name, result)
+            checks.append({
+                "check": "row_count",
+                "table": table_name,
+                "value": result.rows[0][0] if result.rows else 0,
+            })
+            metadata.append({
+                "query": result.query,
+                "execution_time_ms": result.execution_time_ms,
+                "row_count": result.row_count,
+                "status": "success",
+            })
+        else:
+            metadata.append({
+                "query": result.query,
+                "error": result.message,
+                "status": "failed",
+            })
+
+    _NUMERIC_PREFIXES = (
+        "integer", "int", "bigint", "smallint", "tinyint",
+        "float", "double", "real", "decimal", "numeric",
+    )
+
+    def _verify_numeric_sums(
+        self,
+        context: PipelineContext,
+        table_name: str,
+        columns: list[dict],
+        checks: list[dict[str, Any]],
+        metadata: list[dict[str, Any]],
+    ) -> None:
+        for col in columns:
+            col_type = col.get("type", "").lower()
+            if not any(
+                col_type.startswith(t) for t in self._NUMERIC_PREFIXES
+            ):
+                continue
+            col_name = col["name"]
+            sql = f'SELECT SUM("{col_name}") FROM "{table_name}"'
+            result = execute_query(context.duckdb_path, sql)
+            if isinstance(result, QueryResult):
+                context.store_query_result(self.name, result)
+                checks.append({
+                    "check": "numeric_sum",
+                    "column": col_name,
+                    "value": (
+                        result.rows[0][0] if result.rows else None
+                    ),
+                })
+                metadata.append({
+                    "query": result.query,
+                    "execution_time_ms": result.execution_time_ms,
+                    "row_count": result.row_count,
+                    "status": "success",
+                })
+            else:
+                metadata.append({
+                    "query": result.query,
+                    "error": result.message,
+                    "status": "failed",
+                })
+
+    async def run_helpers(
+        self, parsed: dict, context: PipelineContext,
+    ) -> dict:
         """Run verification queries: row counts and numeric sums."""
         query_metadata: list[dict[str, Any]] = []
 
@@ -178,70 +257,18 @@ class SourceTieoutAgent(BaseAgent):
 
             verification_checks: list[dict[str, Any]] = []
 
-            # Row count check
-            count_sql = f'SELECT COUNT(*) FROM "{table_name}"'
-            count_result = execute_query(context.duckdb_path, count_sql)
-            if isinstance(count_result, QueryResult):
-                context.store_query_result(self.name, count_result)
-                row_count = count_result.rows[0][0] if count_result.rows else 0
-                verification_checks.append({
-                    "check": "row_count",
-                    "table": table_name,
-                    "value": row_count,
-                })
-                query_metadata.append({
-                    "query": count_result.query,
-                    "execution_time_ms": count_result.execution_time_ms,
-                    "row_count": count_result.row_count,
-                    "status": "success",
-                })
-            else:
-                query_metadata.append({
-                    "query": count_result.query,
-                    "error": count_result.message,
-                    "status": "failed",
-                })
-
-            # Numeric column sums
-            numeric_types = (
-                "integer", "int", "bigint", "smallint", "tinyint",
-                "float", "double", "real", "decimal", "numeric",
+            self._verify_row_count(
+                context, table_name, verification_checks, query_metadata,
             )
-            for col in columns:
-                col_type = col.get("type", "").lower()
-                if any(col_type.startswith(t) for t in numeric_types):
-                    col_name = col["name"]
-                    sum_sql = (
-                        f'SELECT SUM("{col_name}") FROM "{table_name}"'
-                    )
-                    sum_result = execute_query(
-                        context.duckdb_path, sum_sql
-                    )
-                    if isinstance(sum_result, QueryResult):
-                        context.store_query_result(self.name, sum_result)
-                        val = sum_result.rows[0][0] if sum_result.rows else None
-                        verification_checks.append({
-                            "check": "numeric_sum",
-                            "column": col_name,
-                            "value": val,
-                        })
-                        query_metadata.append({
-                            "query": sum_result.query,
-                            "execution_time_ms": sum_result.execution_time_ms,
-                            "row_count": sum_result.row_count,
-                            "status": "success",
-                        })
-                    else:
-                        query_metadata.append({
-                            "query": sum_result.query,
-                            "error": sum_result.message,
-                            "status": "failed",
-                        })
+            self._verify_numeric_sums(
+                context, table_name, columns,
+                verification_checks, query_metadata,
+            )
 
             parsed["verification_checks"] = verification_checks
         except Exception as exc:
             logger.exception(
-                "Unexpected error in %s run_helpers", self.name
+                _LOG_HELPERS_ERROR, self.name
             )
             query_metadata.append({
                 "error": str(exc), "status": "error",
@@ -269,7 +296,9 @@ class DescriptiveAnalyticsAgent(BaseAgent):
             "DATASET": _first_table_name(context),
         }
 
-    async def run_helpers(self, parsed: dict, context: PipelineContext) -> dict:
+    async def run_helpers(
+        self, parsed: dict, context: PipelineContext,
+    ) -> dict:
         """Compute segmentation and top-N analysis."""
         query_metadata: list[dict[str, Any]] = []
 
@@ -370,7 +399,7 @@ class DescriptiveAnalyticsAgent(BaseAgent):
             parsed["computed_top_n"] = computed_top_n
         except Exception as exc:
             logger.exception(
-                "Unexpected error in %s run_helpers", self.name
+                _LOG_HELPERS_ERROR, self.name
             )
             query_metadata.append({
                 "error": str(exc), "status": "error",
@@ -396,7 +425,9 @@ class OvertimeTrendAgent(BaseAgent):
             "DATASET": _first_table_name(context),
         }
 
-    async def run_helpers(self, parsed: dict, context: PipelineContext) -> dict:
+    async def run_helpers(
+        self, parsed: dict, context: PipelineContext,
+    ) -> dict:
         """Compute time series and detect anomalies."""
         query_metadata: list[dict[str, Any]] = []
 
@@ -502,7 +533,7 @@ class OvertimeTrendAgent(BaseAgent):
             parsed["computed_anomalies"] = computed_anomalies
         except Exception as exc:
             logger.exception(
-                "Unexpected error in %s run_helpers", self.name
+                _LOG_HELPERS_ERROR, self.name
             )
             query_metadata.append({
                 "error": str(exc), "status": "error",
@@ -529,7 +560,9 @@ class RootCauseInvestigatorAgent(BaseAgent):
             "DATASET": _first_table_name(context),
         }
 
-    async def run_helpers(self, parsed: dict, context: PipelineContext) -> dict:
+    async def run_helpers(
+        self, parsed: dict, context: PipelineContext,
+    ) -> dict:
         """Execute drill-down SQL queries from LLM output."""
         query_metadata: list[dict[str, Any]] = []
 
@@ -574,7 +607,7 @@ class RootCauseInvestigatorAgent(BaseAgent):
             parsed["drill_down_results"] = drill_down_results
         except Exception as exc:
             logger.exception(
-                "Unexpected error in %s run_helpers", self.name
+                _LOG_HELPERS_ERROR, self.name
             )
             query_metadata.append({
                 "error": str(exc), "status": "error",
@@ -601,7 +634,9 @@ class ValidationAgent(BaseAgent):
             "DATASET": _first_table_name(context),
         }
 
-    async def run_helpers(self, parsed: dict, context: PipelineContext) -> dict:
+    async def run_helpers(
+        self, parsed: dict, context: PipelineContext,
+    ) -> dict:
         """Run programmatic validation stack and merge with LLM output."""
         findings = _collect_findings(context)
         source_data = _build_source_data(context)
@@ -642,43 +677,54 @@ class ChartMakerAgent(BaseAgent):
             "DATASET": _first_table_name(context),
         }
 
-    async def run_helpers(self, parsed: dict, context: PipelineContext) -> dict:
-        """Execute data queries and generate chart images."""
-        query_metadata: list[dict[str, Any]] = []
-
-        # Execute data queries if present in LLM output
-        if (
+    def _execute_data_queries(
+        self,
+        parsed: dict,
+        context: PipelineContext,
+        query_metadata: list[dict[str, Any]],
+    ) -> None:
+        """Execute data queries from LLM output."""
+        if not (
             context.duckdb_path
             and Path(context.duckdb_path).exists()
             and parsed.get("data_queries")
             and isinstance(parsed["data_queries"], list)
         ):
-            try:
-                for sql in parsed["data_queries"]:
-                    if not isinstance(sql, str) or not sql.strip():
-                        continue
-                    result = execute_query(context.duckdb_path, sql)
-                    if isinstance(result, QueryResult):
-                        context.store_query_result(self.name, result)
-                        query_metadata.append({
-                            "query": result.query,
-                            "execution_time_ms": result.execution_time_ms,
-                            "row_count": result.row_count,
-                            "status": "success",
-                        })
-                    else:
-                        query_metadata.append({
-                            "query": result.query,
-                            "error": result.message,
-                            "status": "failed",
-                        })
-            except Exception as exc:
-                logger.exception(
-                    "Data query execution failed in %s", self.name
-                )
-                query_metadata.append({
-                    "error": str(exc), "status": "error",
-                })
+            return
+        try:
+            for sql in parsed["data_queries"]:
+                if not isinstance(sql, str) or not sql.strip():
+                    continue
+                result = execute_query(context.duckdb_path, sql)
+                if isinstance(result, QueryResult):
+                    context.store_query_result(self.name, result)
+                    query_metadata.append({
+                        "query": result.query,
+                        "execution_time_ms": result.execution_time_ms,
+                        "row_count": result.row_count,
+                        "status": "success",
+                    })
+                else:
+                    query_metadata.append({
+                        "query": result.query,
+                        "error": result.message,
+                        "status": "failed",
+                    })
+        except Exception as exc:
+            logger.exception(
+                "Data query execution failed in %s", self.name
+            )
+            query_metadata.append({
+                "error": str(exc), "status": "error",
+            })
+
+    async def run_helpers(
+        self, parsed: dict, context: PipelineContext,
+    ) -> dict:
+        """Execute data queries and generate chart images."""
+        query_metadata: list[dict[str, Any]] = []
+
+        self._execute_data_queries(parsed, context, query_metadata)
 
         # Generate charts from LLM-provided specs
         chart_dicts = parsed.get("charts", [])
