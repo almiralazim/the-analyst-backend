@@ -331,7 +331,7 @@ async def get_dataset(
     - If `status` is `"error"`, display `error_message` to explain what went wrong during profiling.
     """
     # Check cache
-    cache_key = make_cache_key("dataset", str(dataset_id), "detail")
+    cache_key = make_cache_key("dataset", str(dataset_id), "detail", str(user.id))
     cached = await cache_get(cache_key)
     if cached is not None:
         return cached

@@ -1,4 +1,4 @@
-"""Pre-built analytical functions for the The Analyst pipeline.
+"""Pre-built analytical functions for The Analyst pipeline.
 
 Provides high-level analytics operations — summary statistics, time series
 aggregation, segmentation, correlation, anomaly detection, and top-N

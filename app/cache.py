@@ -43,7 +43,7 @@ async def close_redis() -> None:
 async def cache_get(key: str) -> Any | None:
     """Get a cached value by key. Returns None on miss or error."""
     try:
-        r = await get_redis()
+        r = get_redis()
         value = await r.get(key)
         if value is not None:
             return json.loads(value)
@@ -55,7 +55,7 @@ async def cache_get(key: str) -> Any | None:
 async def cache_set(key: str, value: Any, ttl_seconds: int = 300) -> None:
     """Set a cached value with TTL. Silently fails on error."""
     try:
-        r = await get_redis()
+        r = get_redis()
         await r.set(key, json.dumps(value, default=str), ex=ttl_seconds)
     except Exception:
         logger.debug("Cache set failed for key: %s", key)
@@ -64,7 +64,7 @@ async def cache_set(key: str, value: Any, ttl_seconds: int = 300) -> None:
 async def cache_delete(key: str) -> None:
     """Delete a cached key. Silently fails on error."""
     try:
-        r = await get_redis()
+        r = get_redis()
         await r.delete(key)
     except Exception:
         pass
@@ -73,7 +73,7 @@ async def cache_delete(key: str) -> None:
 async def cache_delete_pattern(pattern: str) -> None:
     """Delete all keys matching a pattern. Use sparingly."""
     try:
-        r = await get_redis()
+        r = get_redis()
         async for key in r.scan_iter(match=pattern):
             await r.delete(key)
     except Exception:

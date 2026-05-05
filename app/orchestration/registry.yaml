@@ -1,5 +1,5 @@
 # Agent registry for the MVP pipeline (10 agents, 7 tiers)
-# Derived from the the-analyst agents/registry.yaml
+# Derived from The Analyst agents/registry.yaml
 # Only includes agents in the deep_dive execution plan
 
 version: 1

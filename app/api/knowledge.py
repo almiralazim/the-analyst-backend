@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Annotated
+
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -41,8 +43,8 @@ router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 async def create_correction(
     request: Request,
     body: CreateCorrectionRequest,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    user: Annotated[User, Depends(get_current_user)] = None,
+    db: Annotated[AsyncSession, Depends(get_db)] = None,
 ):
     """Record a correction that the system should learn from for future analyses.
 
@@ -108,7 +110,7 @@ async def create_correction(
     response_model=PaginatedResponse[CorrectionResponse],
     response_model_exclude_none=True,
     summary="List corrections with optional filters",
-    response_description="Paginated list of corrections with filter metadata",
+    response_description="Paginated list of corrections",
     responses={
         401: {"description": "Missing or invalid access token", "content": {"application/json": {"example": {"error": {"code": "UNAUTHORIZED", "message": "Could not validate credentials"}}}}},
     },
@@ -116,13 +118,19 @@ async def create_correction(
 @limiter.limit(settings.rate_limit_default)
 async def list_corrections(
     request: Request,
-    severity: str | None = Query(None, description="Filter by severity: critical, high, medium, low"),
-    category: str | None = Query(None, description="Filter by category (e.g., join_error, filter_missing)"),
-    dataset_id: uuid.UUID | None = Query(None, description="Filter by dataset ID"),
+    severity: Annotated[
+        str | None, Query(description="Filter by severity"),
+    ] = None,
+    category: Annotated[
+        str | None, Query(description="Filter by category"),
+    ] = None,
+    dataset_id: Annotated[
+        uuid.UUID | None, Query(description="Filter by dataset"),
+    ] = None,
     page: int = 1,
     page_size: int = 20,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    user: Annotated[User, Depends(get_current_user)] = None,
+    db: Annotated[AsyncSession, Depends(get_db)] = None,
 ):
     """List all corrections logged by the authenticated user, with optional filters.
 
@@ -204,8 +212,8 @@ async def list_corrections(
 async def create_learning(
     request: Request,
     body: CreateLearningRequest,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    user: Annotated[User, Depends(get_current_user)] = None,
+    db: Annotated[AsyncSession, Depends(get_db)] = None,
 ):
     """Record a learning that enriches the system's knowledge for future analyses.
 
@@ -267,11 +275,13 @@ async def create_learning(
 @limiter.limit(settings.rate_limit_default)
 async def list_learnings(
     request: Request,
-    category: str | None = Query(None, description="Filter by category (e.g., business_context, data_patterns)"),
+    category: Annotated[
+        str | None, Query(description="Filter by category"),
+    ] = None,
     page: int = 1,
     page_size: int = 20,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    user: Annotated[User, Depends(get_current_user)] = None,
+    db: Annotated[AsyncSession, Depends(get_db)] = None,
 ):
     """List all learnings recorded by the authenticated user, with optional category filter.
 

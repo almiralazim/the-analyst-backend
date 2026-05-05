@@ -138,13 +138,13 @@ async def get_results(
     - Use `validation.overall_grade` to show a confidence badge (A/B/C/D/F).
     - The `meta` section provides context about the source dataset and timing.
     """
-    pipeline, results = await _get_pipeline_with_results(pipeline_id, user.id, db)
-
-    # Check cache for completed pipelines
-    cache_key = make_cache_key("results", str(pipeline_id))
+    # Check cache first (user-scoped to prevent auth bypass)
+    cache_key = make_cache_key("results", str(pipeline_id), str(user.id))
     cached = await cache_get(cache_key)
     if cached is not None:
         return cached
+
+    pipeline, results = await _get_pipeline_with_results(pipeline_id, user.id, db)
 
     # Get dataset name
     ds_result = await db.execute(select(Dataset).where(Dataset.id == pipeline.dataset_id))
@@ -260,13 +260,13 @@ async def get_findings(
     - Use `confidence` (0-1) to show a confidence indicator per finding.
     - The `sources` array lists which tables/columns were used to derive the finding.
     """
-    _, results = await _get_pipeline_with_results(pipeline_id, user.id, db)
-
-    # Check cache
-    cache_key = make_cache_key("findings", str(pipeline_id))
+    # Check cache first (user-scoped)
+    cache_key = make_cache_key("findings", str(pipeline_id), str(user.id))
     cached = await cache_get(cache_key)
     if cached is not None:
         return cached
+
+    _, results = await _get_pipeline_with_results(pipeline_id, user.id, db)
 
     findings = [r.content for r in results if r.result_type == "finding" and r.content]
     response = {"data": findings}
@@ -509,13 +509,13 @@ async def get_narrative(
     - `recommendations` is a structured array for rendering action cards.
     - Returns `null` for `data` if the pipeline hasn't produced a narrative yet.
     """
-    _, results = await _get_pipeline_with_results(pipeline_id, user.id, db)
-
-    # Check cache
-    cache_key = make_cache_key("narrative", str(pipeline_id))
+    # Check cache first (user-scoped)
+    cache_key = make_cache_key("narrative", str(pipeline_id), str(user.id))
     cached = await cache_get(cache_key)
     if cached is not None:
         return cached
+
+    _, results = await _get_pipeline_with_results(pipeline_id, user.id, db)
 
     narrative_results = [r for r in results if r.result_type == "narrative"]
     narrative = narrative_results[0].content if narrative_results else None

@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 def _get_storage_uri() -> str | None:
     """Return Redis URI for rate limit storage, or None for in-memory fallback.
 
-    Validates that the Redis URL is reachable at import time would be too slow,
+    Validating that the Redis URL is reachable at import time would be too slow,
     so we just pass the URI and let SlowAPI handle connection errors gracefully.
     """
     if settings.redis_url:

@@ -133,8 +133,11 @@ class BaseAgent(ABC):
         cached = await cache_get(cache_key)
         if cached is not None:
             logger.info("Agent %s LLM cache hit", self.name)
+            content = cached.get("content", "")
+            if not isinstance(content, str):
+                content = ""
             return LLMResponse(
-                content=cached["content"],
+                content=content,
                 model=cached.get("model", "cached"),
                 provider=cached.get("provider", "cache"),
                 input_tokens=cached.get("input_tokens", 0),
