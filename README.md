@@ -12,6 +12,7 @@ A production-ready backend that accepts CSV/Excel uploads, runs a 10-agent analy
 - **Knowledge system** — Corrections and learnings persist across sessions, injected into agent prompts
 - **Export** — HTML, PDF (WeasyPrint), and Word (python-docx) report generation
 - **Security** — JWT auth, WebSocket ownership verification, rate limiting, structured JSON logging
+- **Caching** — Redis-backed response caching for results, datasets, and LLM responses (dev mode)
 - **Docker-ready** — Multi-stage Dockerfile, docker-compose with Postgres + Redis, automatic migrations and seeding
 
 ## Quick Start
@@ -28,7 +29,10 @@ cp .env.example .env
 # Edit .env — set SECRET_KEY, POSTGRES_PASSWORD, and at least one LLM API key
 
 # Start all services (builds image, runs migrations, seeds admin user)
-docker compose up --build -d
+make up
+
+# Or without Make:
+# docker compose up --build -d
 
 # API available at http://localhost:8000
 # Swagger docs at http://localhost:8000/docs
@@ -40,25 +44,25 @@ docker compose up --build -d
 ```bash
 # Prerequisites: Python 3.11+, PostgreSQL 16+, Redis, uv
 
-# Create virtual environment
-python -m venv .venv
-source .venv/bin/activate
+# Full setup (creates venv, installs deps, copies .env.example)
+make setup
 
-# Install dependencies
-uv pip install -e ".[dev]"
+# Or manually:
+# python -m venv .venv
+# source .venv/bin/activate
+# uv pip install -e ".[dev]"
+# cp .env.example .env
 
-# Copy and configure environment
-cp .env.example .env
 # Edit .env with your SECRET_KEY, DATABASE_URL, REDIS_URL, and LLM API keys
 
 # Run database migrations
-alembic upgrade head
+make migrate
 
 # Seed the admin user
-python -m app.seed
+make seed
 
-# Start the server
-uvicorn main:app --reload --port 8000
+# Start the development server (hot reload)
+make dev
 ```
 
 ### First Login
@@ -142,7 +146,7 @@ graph TD
 Set `LLM_DEFAULT_PROVIDER` in `.env`. At least one API key is required.
 
 | Provider | Env Var | Default Model |
-|----------|---------|---------------|
+| ---------- | --------- | --------------- |
 | Anthropic | `ANTHROPIC_API_KEY` | claude-sonnet-4-20250514 |
 | OpenAI | `OPENAI_API_KEY` | gpt-4o |
 | Google Gemini | `GEMINI_API_KEY` | gemini-2.5-pro |
@@ -153,7 +157,7 @@ All providers include automatic retry with exponential backoff on rate limits (4
 ## API Endpoints
 
 | Method | Endpoint | Description |
-|--------|----------|-------------|
+| -------- | ---------- | ------------- |
 | `POST` | `/api/v1/auth/register` | Register a new user |
 | `POST` | `/api/v1/auth/login` | Login and get tokens |
 | `POST` | `/api/v1/auth/refresh` | Refresh access token |
@@ -197,6 +201,7 @@ Tier 6: storytelling
 ```
 
 Each agent:
+
 1. Renders a prompt template with dataset context and corrections
 2. Calls the configured LLM provider (with retry)
 3. Parses the structured JSON response
@@ -215,15 +220,36 @@ Agents can execute SQL queries against uploaded datasets during pipeline runs:
 ## Testing
 
 ```bash
-# Run all tests
-pytest tests/ -v
-
-# Run only unit tests (fast)
-pytest tests/ -v --ignore=tests/integration
-
-# Run with coverage
-pytest tests/ -v --cov=app --cov-report=term-missing
+make test            # Run all tests
+make test-unit       # Unit tests only (fast)
+make test-integration # Integration tests only
+make test-cov        # Tests with coverage report
 ```
+
+## Make Commands
+
+Run `make help` to see all available commands:
+
+| Command | Description |
+| --------- | ------------- |
+| `make setup` | Full local setup (venv + install + env file) |
+| `make dev` | Start development server with hot reload |
+| `make up` | Start Docker containers (detached) |
+| `make down` | Stop Docker containers |
+| `make build` | Build Docker image |
+| `make rebuild` | Rebuild from scratch (no cache) |
+| `make logs` | Tail all container logs |
+| `make migrate` | Run database migrations |
+| `make seed` | Seed the admin user |
+| `make test` | Run all tests |
+| `make test-unit` | Run unit tests only |
+| `make lint` | Run linter (ruff) |
+| `make format` | Auto-format code |
+| `make typecheck` | Run mypy type checking |
+| `make check` | Run lint + typecheck + tests |
+| `make clean` | Remove caches and build artifacts |
+| `make db-reset` | Drop and recreate database (destructive) |
+| `make docs` | Open API docs in browser |
 
 ## Project Structure
 
@@ -289,6 +315,7 @@ the-analyst-backend/
 │   └── KANKA_AI_ANALYST_ARCHITECTURE.md
 ├── CONTRIBUTING.md                # Contributor guide
 ├── LICENSE                        # Apache 2.0
+├── Makefile                       # Development commands (make help)
 ├── pyproject.toml                 # Dependencies + tool config
 ├── docker-compose.yml             # App + Postgres + Redis
 ├── Dockerfile                     # Multi-stage build
@@ -300,22 +327,26 @@ the-analyst-backend/
 All configuration is via environment variables (or `.env` file). See [.env.example](.env.example) for the full list.
 
 **Required:**
+
 - `SECRET_KEY` — JWT signing key (min 32 chars, generate with `python -c "import secrets; print(secrets.token_urlsafe(64))"`)
 - `DATABASE_URL` — PostgreSQL connection string
 - `REDIS_URL` — Redis connection string
 - At least one LLM API key
 
 **Optional (with defaults):**
+
 - `PIPELINE_TIMEOUT_SECONDS` (600) — Max pipeline execution time
 - `AGENT_DEFAULT_TIMEOUT_SECONDS` (300) — Per-agent timeout
 - `LLM_MAX_RETRIES` (3) — LLM retry attempts
+- `LLM_CACHE_ENABLED` (false) — Enable LLM response caching (useful for development)
+- `LLM_CACHE_TTL_SECONDS` (3600) — Cache TTL for LLM responses
 - `RATE_LIMIT_DEFAULT` ("60/minute") — Default API rate limit
 - `RATE_LIMIT_HEAVY` ("10/minute") — Upload/pipeline creation limit
 
 ## Documentation
 
-- **Swagger UI**: http://localhost:8000/docs
-- **ReDoc**: http://localhost:8000/redoc
+- **Swagger UI**: [http://localhost:8000/docs](http://localhost:8000/docs)
+- **ReDoc**: [http://localhost:8000/redoc](http://localhost:8000/redoc)
 - **API Reference**: [docs/API_REFERENCE.md](docs/API_REFERENCE.md)
 - **Contributing**: [CONTRIBUTING.md](CONTRIBUTING.md)
 

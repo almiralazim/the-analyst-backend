@@ -69,6 +69,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Structured JSON logging with request ID propagation
 - Request ID middleware (X-Request-ID header)
 - Sensitive data redaction in logs
+- `Makefile` with development commands (setup, dev, test, lint, docker, migrations, seed)
+- Redis caching layer: pipeline results (1h TTL), dataset details (5min TTL), LLM responses (dev mode)
+- Rate limiting backed by Redis for distributed deployments
 
 #### Documentation
 

@@ -30,8 +30,20 @@ async def lifespan(app: FastAPI):
     # Ensure storage directory exists
     settings.storage_path.mkdir(parents=True, exist_ok=True)
 
+    # Verify Redis connection (non-blocking — app starts even if Redis is down)
+    from app.cache import get_redis, close_redis
+
+    try:
+        r = await get_redis()
+        await r.ping()
+        logger.info("Redis connected: %s", settings.redis_url)
+    except Exception as e:
+        logger.warning("Redis unavailable at startup (caching disabled): %s", e)
+
     yield
 
+    # Shutdown: close Redis pool
+    await close_redis()
     logger.info("Shutting down %s", settings.app_name)
 
 
@@ -190,6 +202,18 @@ async def health_ready():
     except Exception as e:
         checks["postgresql"] = {"status": "error", "error": str(e)}
         overall = "degraded"
+
+    # Redis
+    try:
+        from app.cache import get_redis as _get_redis
+        r = await _get_redis()
+        await r.ping()
+        checks["redis"] = {"status": "ok"}
+    except Exception as e:
+        checks["redis"] = {"status": "error", "error": str(e)}
+        # Redis being down is degraded, not fatal
+        if overall == "ready":
+            overall = "degraded"
 
     # LLM provider
     checks["llm_provider"] = {
