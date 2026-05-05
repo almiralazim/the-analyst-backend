@@ -660,6 +660,88 @@ if (response.ok) {
 
 ---
 
+## Models
+
+### GET /models
+
+List available LLM providers and models for the model selection dropdown.
+
+**Auth required:** Yes
+
+**Response (200):**
+
+```json
+{
+  "data": {
+    "options": [
+      {
+        "value": "auto",
+        "label": "Auto (Recommended)",
+        "provider": null,
+        "description": "Automatically selects the best model for each agent based on task complexity",
+        "tier": null
+      },
+      {
+        "value": "anthropic",
+        "label": "Anthropic - Claude Sonnet 4",
+        "provider": "anthropic",
+        "description": "Complex reasoning and analysis",
+        "tier": "premium"
+      },
+      {
+        "value": "openai",
+        "label": "OpenAI - GPT-4o",
+        "provider": "openai",
+        "description": "Advanced reasoning and generation",
+        "tier": "premium"
+      },
+      {
+        "value": "gemini",
+        "label": "Gemini - Gemini 2.5 Pro",
+        "provider": "gemini",
+        "description": "Balanced reasoning and generation",
+        "tier": "standard"
+      },
+      {
+        "value": "groq",
+        "label": "Groq - Llama 3.3 70B",
+        "provider": "groq",
+        "description": "Ultra-fast inference",
+        "tier": "fast"
+      }
+    ],
+    "default": "auto",
+    "warning": null
+  }
+}
+```
+
+**Notes:**
+- Only providers with configured API keys appear in the response.
+- Use the `value` field as the `model` parameter when creating a pipeline.
+- The `tier` field indicates model capability: "premium" (complex reasoning), "standard" (balanced), "fast" (simple tasks).
+
+**curl example:**
+
+```bash
+curl http://localhost:8000/api/v1/models \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**TypeScript example:**
+
+```typescript
+const response = await fetch('/api/v1/models', {
+  headers: { Authorization: `Bearer ${token}` },
+});
+
+const { data } = await response.json();
+// data.options — populate a <select> dropdown
+// data.default — pre-select this value ("auto")
+```
+
+---
+
 ## Pipelines
 
 ### POST /pipelines
@@ -675,6 +757,7 @@ Create and start a new analysis pipeline.
 | `dataset_id` | UUID | Yes | ID of a dataset with `status: "ready"` |
 | `question` | string | Yes | Analytical question (5-2000 characters) |
 | `plan` | string | No | Execution plan: `"deep_dive"` (default), `"full_presentation"`, `"validate_only"` |
+| `model` | string | No | LLM model: `"auto"` (default), provider name, or model ID. Use `GET /models` for options. |
 
 **Execution Plans:**
 

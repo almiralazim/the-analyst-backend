@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - FastAPI application with async SQLAlchemy ORM and PostgreSQL
 - 10-agent DAG pipeline with 7-tier parallel execution
 - 4 LLM provider integrations (Anthropic, OpenAI, Google Gemini, Groq)
+- Smart model routing: user-selectable models with "auto" mode for tier-based agent-to-model assignment (premium/standard/fast)
+- `GET /api/v1/models` endpoint for frontend model selection dropdown
 - Per-dataset DuckDB analytical engine with safe SQL execution
 - JWT authentication with access/refresh token flow
 - WebSocket real-time pipeline progress streaming

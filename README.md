@@ -6,6 +6,7 @@ A production-ready backend that accepts CSV/Excel uploads, runs a 10-agent analy
 
 - **Multi-agent DAG pipeline** — 10 specialized agents execute in 7 tiers with parallel execution, timeouts, and progress streaming
 - **4 LLM providers** — Anthropic, OpenAI, Google Gemini, Groq with automatic retry and exponential backoff
+- **Smart model routing** — Users choose a specific model or use "auto" mode where the system picks the best model per agent task (premium/standard/fast tiers)
 - **DuckDB analytics** — Per-dataset analytical engine with safe SQL execution, validation, and pre-built analytical functions
 - **4-layer validation** — Structural, logical, business rules, and Simpson's Paradox checks with A-F confidence grading
 - **Chart generation** — Matplotlib/Seaborn charts following Storytelling with Data methodology, exportable as PNG/SVG/PDF
@@ -145,14 +146,27 @@ graph TD
 
 Set `LLM_DEFAULT_PROVIDER` in `.env`. At least one API key is required.
 
-| Provider | Env Var | Default Model |
-| ---------- | --------- | --------------- |
-| Anthropic | `ANTHROPIC_API_KEY` | claude-sonnet-4-20250514 |
-| OpenAI | `OPENAI_API_KEY` | gpt-4o |
-| Google Gemini | `GEMINI_API_KEY` | gemini-2.5-pro |
-| Groq | `GROQ_API_KEY` | llama-3.3-70b-versatile |
+| Provider | Env Var | Default Model | Tier |
+| ---------- | --------- | --------------- | ------ |
+| Anthropic | `ANTHROPIC_API_KEY` | claude-sonnet-4-20250514 | Premium |
+| OpenAI | `OPENAI_API_KEY` | gpt-4o | Premium |
+| Google Gemini | `GEMINI_API_KEY` | gemini-2.5-pro | Standard |
+| Groq | `GROQ_API_KEY` | llama-3.3-70b-versatile | Fast |
 
 All providers include automatic retry with exponential backoff on rate limits (429) and server errors (5xx).
+
+### Model Selection
+
+When creating a pipeline, users can choose which model to use via the `model` field:
+
+- **`"auto"`** (default) — System picks the best model per agent based on task complexity:
+  - Premium tier (complex reasoning): Claude Sonnet 4 or GPT-4o
+  - Standard tier (balanced): Gemini 2.5 Pro or GPT-4o
+  - Fast tier (simple extraction): Groq Llama or Claude Haiku
+- **Provider name** (e.g. `"anthropic"`) — Uses that provider's default model for all agents
+- **Model ID** (e.g. `"gpt-4o-mini"`) — Uses that exact model for all agents
+
+Use `GET /api/v1/models` to get the list of available models for a frontend dropdown.
 
 ## API Endpoints
 
@@ -167,6 +181,7 @@ All providers include automatic retry with exponential backoff on rate limits (4
 | `GET` | `/api/v1/datasets/:id` | Dataset detail + schema |
 | `GET` | `/api/v1/datasets/:id/tables/:name/preview` | Preview table data |
 | `DELETE` | `/api/v1/datasets/:id` | Delete dataset |
+| `GET` | `/api/v1/models` | List available LLM models (for dropdown) |
 | `POST` | `/api/v1/pipelines` | Start analysis pipeline |
 | `GET` | `/api/v1/pipelines` | List pipelines |
 | `GET` | `/api/v1/pipelines/:id` | Pipeline status + agents |

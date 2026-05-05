@@ -29,7 +29,7 @@ Instead, please report vulnerabilities via one of these channels:
 ### Response Timeline
 
 | Action | Timeline |
-|--------|----------|
+| -------- | ---------- |
 | Acknowledgment of report | Within 48 hours |
 | Initial assessment | Within 5 business days |
 | Fix development | Depends on severity (see below) |
@@ -38,7 +38,7 @@ Instead, please report vulnerabilities via one of these channels:
 ### Severity-Based Response
 
 | Severity | Fix Timeline | Examples |
-|----------|-------------|----------|
+| ---------- | ------------- | ---------- |
 | Critical | 24-72 hours | Authentication bypass, remote code execution, data exfiltration |
 | High | 1-2 weeks | SQL injection, privilege escalation, credential exposure |
 | Medium | 2-4 weeks | XSS, CSRF, information disclosure, rate limit bypass |
@@ -49,18 +49,21 @@ Instead, please report vulnerabilities via one of these channels:
 This project implements the following security controls:
 
 ### Authentication & Authorization
+
 - JWT-based authentication with short-lived access tokens (60 min) and refresh tokens (7 days)
 - bcrypt password hashing (cost factor 12)
 - WebSocket ownership verification — users cannot observe other users' pipeline progress
 - All resource access is scoped to the authenticated user (no cross-tenant data leakage)
 
 ### Input Validation
+
 - Pydantic schema validation on all request bodies
 - SQL injection prevention via sqlglot parsing — only SELECT statements are allowed against DuckDB
 - File upload validation (type, size, count limits)
 - Rate limiting on all endpoints (SlowAPI)
 
 ### Secrets Management
+
 - No hardcoded credentials in source code
 - `SECRET_KEY` validated at startup — rejects known placeholders and enforces minimum length
 - All secrets loaded from environment variables or `.env` file
@@ -68,6 +71,7 @@ This project implements the following security controls:
 - Sensitive data redacted from structured logs
 
 ### Infrastructure
+
 - Multi-stage Docker build with non-root runtime user
 - Read-only DuckDB connections for analytical queries
 - PostgreSQL connections via asyncpg with connection pooling
@@ -75,6 +79,7 @@ This project implements the following security controls:
 - CORS configured with explicit origin allowlist
 
 ### Dependencies
+
 - Pinned dependency versions in `pyproject.toml`
 - bcrypt pinned to <5.0 for passlib compatibility
 - No open version ranges in production dependencies
@@ -95,6 +100,7 @@ This project implements the following security controls:
 ## Scope
 
 The following are **in scope** for security reports:
+
 - Authentication and authorization bypasses
 - SQL injection or command injection
 - Cross-site scripting (XSS) in API responses
@@ -104,6 +110,7 @@ The following are **in scope** for security reports:
 - File system access beyond intended storage directories
 
 The following are **out of scope**:
+
 - Vulnerabilities in third-party dependencies (report to the upstream project)
 - Social engineering attacks
 - Physical security
