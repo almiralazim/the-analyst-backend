@@ -1,0 +1,63 @@
+# Agent registry for the MVP pipeline (10 agents, 7 tiers)
+# Derived from the ai-analyst agents/registry.yaml
+# Only includes agents in the deep_dive execution plan
+
+version: 1
+agents:
+  - name: question-framing
+    pipeline_step: 1
+    critical: true
+    depends_on: []
+
+  - name: data-explorer
+    pipeline_step: 2
+    critical: true
+    depends_on: []
+
+  - name: hypothesis
+    pipeline_step: 3
+    critical: true
+    depends_on:
+      - question-framing
+
+  - name: source-tieout
+    pipeline_step: 4
+    critical: true
+    depends_on:
+      - data-explorer
+
+  - name: descriptive-analytics
+    pipeline_step: 5
+    critical: true
+    depends_on:
+      - source-tieout
+
+  - name: overtime-trend
+    pipeline_step: 5
+    critical: true
+    depends_on:
+      - source-tieout
+
+  - name: root-cause-investigator
+    pipeline_step: 6
+    critical: true
+    depends_on:
+      - descriptive-analytics
+
+  - name: validation
+    pipeline_step: 7
+    critical: true
+    depends_on:
+      - root-cause-investigator
+
+  - name: chart-maker
+    pipeline_step: 8
+    critical: true
+    depends_on:
+      - validation
+
+  - name: storytelling
+    pipeline_step: 9
+    critical: true
+    depends_on:
+      - chart-maker
