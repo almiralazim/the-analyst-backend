@@ -98,4 +98,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - python-docx, Jinja2
 - Optional: WeasyPrint (PDF export)
 
-[0.1.0]: https://github.com/
+[0.1.0]: https://github.com/Creacubedusa/the-analyst-backend/releases/tag/v0.1.0

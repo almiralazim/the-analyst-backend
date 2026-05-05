@@ -14,7 +14,7 @@ Thanks for your interest in contributing. This guide covers environment setup, r
 ### Clone and Install
 
 ```bash
-git clone https://github.com/<org>/the-analyst-backend.git
+git clone https://github.com/Creacubedusa/the-analyst-backend.git
 cd the-analyst-backend
 
 # Create a virtual environment

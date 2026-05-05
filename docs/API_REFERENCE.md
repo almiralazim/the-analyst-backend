@@ -1,6 +1,6 @@
 # The Analyst API Reference
 
-A complete integration guide for frontend engineers consuming the The Analyst Backend API.
+A complete integration guide for frontend engineers consuming The Analyst Backend API.
 
 ---
 
@@ -159,7 +159,7 @@ Authenticate with email and password.
 **Request Body:**
 
 | Field | Type | Required | Description |
-| ------- | ------ | ---- | ---------- | ------------- |
+| ------- | ------ | ---------- | ------------- |
 | `email` | string | Yes | Registered email address |
 | `password` | string | Yes | Account password |
 
@@ -219,7 +219,6 @@ Exchange a valid refresh token for a new access token.
 
 | Field | Type | Required | Description |
 | ------- | ------ | ---------- | ------------- |
-------|----------|-------------|
 | `refresh_token` | string | Yes | Valid refresh token from login/register |
 
 **Response (200):**

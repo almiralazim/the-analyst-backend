@@ -17,7 +17,7 @@ We take security seriously. If you discover a security vulnerability in this pro
 Instead, please report vulnerabilities via one of these channels:
 
 1. **Email:** Send details to `security@<your-domain>.com`
-2. **GitHub Security Advisories:** Use the [private vulnerability reporting](https://github.com/<org>/the-analyst-backend/security/advisories/new) feature
+2. **GitHub Security Advisories:** Use the [private vulnerability reporting](https://github.com/Creacubedusa/the-analyst-backend/security/advisories/new) feature
 
 ### What to Include
 

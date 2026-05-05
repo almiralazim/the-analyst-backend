@@ -15,6 +15,7 @@ help: ## Show this help message
 # ---------------------------------------------------------------------------
 
 install: ## Install all dependencies (production + dev)
+	@test -d .venv || python -m venv .venv
 	uv pip install -e ".[dev]" --python .venv/bin/python
 
 venv: ## Create a virtual environment
@@ -94,8 +95,14 @@ db-reset: ## Drop and recreate the database (DESTRUCTIVE)
 	@sleep 3
 	docker compose down -v
 	docker compose up -d db redis
-	@sleep 3
+	@echo "Waiting for database to be ready..."
+	@until docker compose exec db pg_isready -U $${POSTGRES_USER:-analyst} -d $${POSTGRES_DB:-analyst_db} > /dev/null 2>&1; do sleep 1; done
+	@echo "Database ready. Starting API and running migrations..."
 	docker compose up -d api
+	@sleep 2
+	docker compose exec api alembic upgrade head
+	docker compose exec api python -m app.seed
+	@echo "Database reset complete."
 
 # ---------------------------------------------------------------------------
 # Testing
@@ -134,7 +141,7 @@ check: lint typecheck test ## Run all checks (lint + typecheck + tests)
 # ---------------------------------------------------------------------------
 
 shell: ## Open a Python shell with app context
-	.venv/bin/python -c "from app.config import settings; print(f'Connected: {settings.app_name} v{settings.app_version}')" && .venv/bin/python
+	.venv/bin/python -i -c "from app.config import settings; print(f'Connected: {settings.app_name} v{settings.app_version}')"
 
 docs: ## Open API docs in browser
 	@echo "Opening http://localhost:8000/docs"

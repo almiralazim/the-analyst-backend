@@ -34,7 +34,7 @@ async def lifespan(app: FastAPI):
     from app.cache import get_redis, close_redis
 
     try:
-        r = await get_redis()
+        r = get_redis()
         await r.ping()
         logger.info("Redis connected: %s", settings.redis_url)
     except Exception as e:

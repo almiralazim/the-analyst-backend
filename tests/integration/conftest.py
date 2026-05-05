@@ -142,9 +142,9 @@ async def db_session(
 
 
 @pytest_asyncio.fixture(scope="function")
-async def client(
+async def client(  # type: ignore[misc]
     db_tables,
-) -> AsyncGenerator[AsyncClient]:
+) -> AsyncGenerator[AsyncClient, None]:
     """Async HTTP client wired to the FastAPI app with the test database.
 
     Overrides the ``get_db`` dependency so all requests use the test
@@ -163,7 +163,9 @@ async def client(
     app.dependency_overrides[get_db] = _override_get_db
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(
+        transport=transport, base_url="http://testserver",
+    ) as ac:
         yield ac
 
     app.dependency_overrides.clear()

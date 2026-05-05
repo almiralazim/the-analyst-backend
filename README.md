@@ -21,7 +21,7 @@ A production-ready backend that accepts CSV/Excel uploads, runs a 10-agent analy
 
 ```bash
 # Clone the repository
-git clone https://github.com/<org>/the-analyst-backend.git
+git clone https://github.com/Creacubedusa/the-analyst-backend.git
 cd the-analyst-backend
 
 # Copy environment file and configure
