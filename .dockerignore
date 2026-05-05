@@ -1,0 +1,41 @@
+# Version control
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.venv
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# IDE and editor
+.vscode
+.idea
+.history
+.qodo
+.kiro
+*.swp
+*.swo
+.DS_Store
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Tests and docs
+tests
+docs
+README.md
+
+# Storage data (mounted at runtime)
+storage/*
+!storage/.gitkeep
