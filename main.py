@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from slowapi.errors import RateLimitExceeded
 
 from app.config import settings
@@ -103,8 +103,8 @@ ws://<host>/api/v1/pipelines/{pipeline_id}/ws?token=<access_token>
 ```
 """,
     lifespan=lifespan,
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url="/api/v1/docs",
+    redoc_url="/api/v1/redoc",
     openapi_tags=[
         {
             "name": "auth",
@@ -206,7 +206,7 @@ async def health_ready():
     # Redis
     try:
         from app.cache import get_redis as _get_redis
-        r = await _get_redis()
+        r = _get_redis()
         await r.ping()
         checks["redis"] = {"status": "ok"}
     except Exception as e:
@@ -256,6 +256,21 @@ app.include_router(pipelines_router, prefix=_API_PREFIX)
 app.include_router(results_router, prefix=_API_PREFIX)
 app.include_router(knowledge_router, prefix=_API_PREFIX)
 app.include_router(models_router, prefix=_API_PREFIX)
+
+
+# ---------------------------------------------------------------------------
+# Redirect legacy /docs and /redoc to the versioned paths
+# ---------------------------------------------------------------------------
+
+
+@app.get("/docs", include_in_schema=False)
+async def _redirect_docs():
+    return RedirectResponse(url="/api/v1/docs")
+
+
+@app.get("/redoc", include_in_schema=False)
+async def _redirect_redoc():
+    return RedirectResponse(url="/api/v1/redoc")
 
 
 # ---------------------------------------------------------------------------
