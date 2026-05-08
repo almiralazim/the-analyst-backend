@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -25,6 +24,11 @@ from app.rate_limit import limiter
 from app.schemas.common import ApiResponse, PaginatedMeta, PaginatedResponse
 from app.schemas.pipeline import AgentStatusResponse, CreatePipelineRequest, PipelineResponse
 from app.services.auth import get_current_user
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.orchestration.agent_gate import GatingDecision
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/pipelines", tags=["pipelines"])
@@ -163,7 +167,12 @@ async def create_pipeline(
     await db.flush()
 
     # Launch pipeline execution in background
-    task = asyncio.create_task(_run_pipeline(pipeline.id, dataset, user.id, body.question, body.plan, body.model))
+    task = asyncio.create_task(
+        _run_pipeline(
+            pipeline.id, dataset, user.id, body.question,
+            body.plan, body.model, body.force_full_analysis,
+        )
+    )
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
@@ -500,6 +509,203 @@ async def broadcast_progress(pipeline_id: str, event: dict) -> None:
 
 # --- Background pipeline execution ---
 
+def _build_gating_decision_payload(gating_decision) -> dict:
+    """Serialize a GatingDecision into a dict for events/metadata."""
+    return {
+        "intent": gating_decision.intent.value,
+        "complexity": gating_decision.complexity.value,
+        "dispatched_agents": gating_decision.dispatched_agents,
+        "skipped_agents": [
+            {"name": s.name, "tier": s.tier, "reason": s.reason}
+            for s in gating_decision.skipped_agents
+        ],
+        "gate_duration_ms": gating_decision.gate_duration_ms,
+        "reasoning": gating_decision.reasoning,
+    }
+
+
+async def _broadcast_gating_events(
+    pipeline_id_str: str, gating_decision
+) -> None:
+    """Broadcast gating decision and individual agent_skipped events."""
+    payload = _build_gating_decision_payload(gating_decision)
+    payload["event"] = "gating_decision"
+    payload["timestamp"] = datetime.now(timezone.utc).isoformat()
+    await broadcast_progress(pipeline_id_str, payload)
+
+    for skipped in gating_decision.skipped_agents:
+        await broadcast_progress(pipeline_id_str, {
+            "event": "agent_skipped",
+            "agent": skipped.name,
+            "tier": skipped.tier,
+            "reason": skipped.reason,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+
+async def _apply_gating_and_filter(
+    context,
+    agents: list,
+    remaining_agents: list,
+    plan: str,
+    pipeline_id: uuid.UUID,
+    db: AsyncSession,
+):
+    """Apply agent gate and filter remaining agents. Returns (filtered_agents, decision)."""
+    pipeline_id_str = str(pipeline_id)
+    gating_decision = await _apply_agent_gate(
+        context, agents, plan, pipeline_id_str,
+    )
+    if gating_decision is None:
+        return remaining_agents, None
+
+    await _broadcast_gating_events(pipeline_id_str, gating_decision)
+
+    dispatched_set = set(gating_decision.dispatched_agents)
+    gated_out_agents = [a for a in remaining_agents if a.name not in dispatched_set]
+    filtered_agents = [a for a in remaining_agents if a.name in dispatched_set]
+
+    for agent in gated_out_agents:
+        await _update_agent_status(db, pipeline_id, agent.name, "gated_out")
+
+    return filtered_agents, gating_decision
+
+
+def _compute_gating_metrics(context, agents: list, gating_decision) -> dict:
+    """Compute token usage and gating metrics."""
+    total_input_tokens = 0
+    total_output_tokens = 0
+    for agent_output in context.agent_outputs.values():
+        if isinstance(agent_output, dict):
+            usage = agent_output.get("llm_usage", {})
+            total_input_tokens += usage.get("input_tokens", 0)
+            total_output_tokens += usage.get("output_tokens", 0)
+
+    agents_available_count = len([a for a in agents if a.name != "question-framing"])
+    agents_dispatched_count = (
+        len(gating_decision.dispatched_agents)
+        if gating_decision is not None
+        else agents_available_count
+    )
+    agents_skipped_count = agents_available_count - agents_dispatched_count
+    gate_duration_ms = (
+        gating_decision.gate_duration_ms if gating_decision is not None else 0
+    )
+
+    avg_tokens_per_agent = 0
+    total_tokens = total_input_tokens + total_output_tokens
+    if agents_dispatched_count > 0 and total_tokens > 0:
+        avg_tokens_per_agent = total_tokens // agents_dispatched_count
+    estimated_token_savings = avg_tokens_per_agent * agents_skipped_count
+
+    return {
+        "total_token_count": total_tokens,
+        "input_tokens": total_input_tokens,
+        "output_tokens": total_output_tokens,
+        "agents_dispatched_count": agents_dispatched_count,
+        "agents_available_count": agents_available_count,
+        "agents_skipped_count": agents_skipped_count,
+        "gate_duration_ms": gate_duration_ms,
+        "estimated_token_savings": estimated_token_savings,
+    }
+
+
+async def _handle_progress_event(
+    db: AsyncSession, pipeline_id: uuid.UUID, event: dict
+) -> None:
+    """Route a progress event to the appropriate agent status update."""
+    await broadcast_progress(str(pipeline_id), event)
+    _PROGRESS_HANDLERS = {
+        "agent_started": lambda e: _update_agent_status(
+            db, pipeline_id, e["agent"], "running"
+        ),
+        "agent_completed": lambda e: _update_agent_status(
+            db, pipeline_id, e["agent"], "completed", duration_ms=e.get("duration_ms")
+        ),
+        "agent_failed": lambda e: _update_agent_status(
+            db, pipeline_id, e["agent"], "failed", error=e.get("error")
+        ),
+    }
+    handler = _PROGRESS_HANDLERS.get(event.get("event"))
+    if handler:
+        await handler(event)
+
+
+async def _finalize_pipeline(
+    db: AsyncSession,
+    pipeline: PipelineRun,
+    pipeline_id: uuid.UUID,
+    context,
+    agents: list,
+    gating_decision,
+) -> None:
+    """Store metadata, compute confidence, commit, and broadcast completion."""
+    pipeline.status = "completed"
+    pipeline.completed_at = datetime.now(timezone.utc)
+
+    metadata = pipeline.context_snapshot or {}
+    if gating_decision is not None:
+        metadata["gating_decision"] = _build_gating_decision_payload(gating_decision)
+
+    metrics = _compute_gating_metrics(context, agents, gating_decision)
+    metadata["gating_metrics"] = metrics
+
+    if metrics["agents_skipped_count"] > 0:
+        logger.info(
+            "Pipeline %s gating metrics: dispatched %d/%d agents, "
+            "gate took %dms, estimated %d tokens saved",
+            pipeline_id,
+            metrics["agents_dispatched_count"],
+            metrics["agents_available_count"],
+            metrics["gate_duration_ms"],
+            metrics["estimated_token_savings"],
+        )
+
+    pipeline.context_snapshot = metadata
+
+    if context.validation_result:
+        from app.helpers.confidence_scorer import compute_confidence
+        validation_data = context.validation_result.get(
+            "programmatic_validation", context.validation_result
+        )
+        confidence = compute_confidence(validation_data)
+        pipeline.confidence_grade = confidence.grade
+        pipeline.confidence_score = confidence.score
+
+    await db.commit()
+
+    await broadcast_progress(str(pipeline_id), {
+        "event": "pipeline_completed",
+        "pipeline_id": str(pipeline_id),
+        "confidence_grade": pipeline.confidence_grade,
+        "duration_ms": int((pipeline.completed_at - pipeline.started_at).total_seconds() * 1000),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+async def _handle_pipeline_failure(
+    db: AsyncSession, pipeline: PipelineRun, pipeline_id: uuid.UUID, error: Exception
+) -> None:
+    """Mark pipeline as failed, commit, and broadcast failure event."""
+    from app.orchestration.executor import PipelineError
+
+    logger.exception("Pipeline %s failed", pipeline_id)
+    pipeline.status = "failed"
+    pipeline.error_message = str(error)
+    pipeline.completed_at = datetime.now(timezone.utc)
+    await db.commit()
+
+    event: dict = {
+        "event": "pipeline_failed",
+        "pipeline_id": str(pipeline_id),
+        "error": str(error),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    if isinstance(error, PipelineError):
+        event["failed_at_tier"] = error.tier
+    await broadcast_progress(str(pipeline_id), event)
+
+
 async def _run_pipeline(
     pipeline_id: uuid.UUID,
     dataset: Dataset,
@@ -507,9 +713,9 @@ async def _run_pipeline(
     question: str,
     plan: str,
     model_selection: str = "auto",
+    force_full_analysis: bool = False,
 ) -> None:
     """Background task that executes the full agent pipeline."""
-    from app.agents.runner import execute_agent
     from app.orchestration.context import PipelineContext
     from app.orchestration.dag_resolver import filter_agents_by_plan
     from app.orchestration.executor import execute_pipeline, PipelineError
@@ -520,133 +726,131 @@ async def _run_pipeline(
 
     async with async_session_factory() as db:
         try:
-            # Load pipeline record
             result = await db.execute(select(PipelineRun).where(PipelineRun.id == pipeline_id))
             pipeline = result.scalar_one()
             pipeline.status = "running"
             pipeline.started_at = datetime.now(timezone.utc)
             await db.commit()
 
-            # Bootstrap context with knowledge
             context = await bootstrap_context(dataset, user_id, question, plan, db)
             context.run_id = pipeline_id
 
-            # Load and filter agents
             all_agents = load_registry()
             agents = filter_agents_by_plan(all_agents, plan)
 
-            # Resolve model assignments before execution
-            agent_tiers = get_agent_tiers()
+            # Resolve model assignments
             router = ModelRouter()
-            agent_names = [a.name for a in agents]
             assignments = router.resolve_assignments(
-                agent_names, model_selection, agent_tiers
+                [a.name for a in agents], model_selection, get_agent_tiers()
             )
             assignment_map = {a.agent_name: a for a in assignments}
 
             # Create agent execution records
             for agent in agents:
-                ae = AgentExecution(
+                db.add(AgentExecution(
                     pipeline_run_id=pipeline_id,
                     agent_name=agent.name,
                     tier=agent.tier if agent.tier >= 0 else None,
                     status="queued",
-                )
-                db.add(ae)
+                ))
             await db.commit()
 
-            # Progress callback
             async def on_progress(event: dict):
-                await broadcast_progress(str(pipeline_id), event)
-                # Update agent execution records
-                if event.get("event") == "agent_started":
-                    await _update_agent_status(db, pipeline_id, event["agent"], "running")
-                elif event.get("event") == "agent_completed":
-                    await _update_agent_status(
-                        db, pipeline_id, event["agent"], "completed",
-                        duration_ms=event.get("duration_ms"),
-                    )
-                elif event.get("event") == "agent_failed":
-                    await _update_agent_status(
-                        db, pipeline_id, event["agent"], "failed",
-                        error=event.get("error"),
-                    )
+                await _handle_progress_event(db, pipeline_id, event)
 
-            # Build per-agent LLM provider factory
             def agent_llm_factory(agent_name: str):
-                """Return the LLM provider for a specific agent."""
                 assignment = assignment_map.get(agent_name)
                 if assignment:
-                    return get_llm_provider(
-                        assignment.provider, model=assignment.model
-                    )
+                    return get_llm_provider(assignment.provider, model=assignment.model)
                 return get_llm_provider()
 
-            # Execute pipeline with model-aware agent runner
             async def execute_agent_with_model(agent_name: str, ctx: PipelineContext) -> dict:
                 from app.agents.runner import get_agent
-                llm = agent_llm_factory(agent_name)
-                agent_instance = get_agent(agent_name, llm=llm)
+                agent_instance = get_agent(agent_name, llm=agent_llm_factory(agent_name))
                 return await agent_instance.execute(ctx)
 
-            # Execute pipeline
-            context = await execute_pipeline(agents, context, execute_agent_with_model, on_progress)
+            # Execute question-framing tier first
+            tier1_agents = [a for a in agents if a.name == "question-framing"]
+            remaining_agents = [a for a in agents if a.name != "question-framing"]
 
-            # Store results
+            if tier1_agents:
+                context = await execute_pipeline(
+                    tier1_agents, context, execute_agent_with_model, on_progress,
+                )
+
+            # Apply Agent Gate
+            gating_decision = None
+            bypass_gating = force_full_analysis or plan == "validate_only"
+
+            if remaining_agents and not bypass_gating:
+                remaining_agents, gating_decision = await _apply_gating_and_filter(
+                    context, agents, remaining_agents, plan, pipeline_id, db,
+                )
+
+            if remaining_agents:
+                context = await execute_pipeline(
+                    remaining_agents, context, execute_agent_with_model, on_progress,
+                )
+
+            # Store results and finalize
             from app.services.result_builder import build_and_store_results
             await build_and_store_results(db, pipeline_id, context)
+            await _finalize_pipeline(db, pipeline, pipeline_id, context, agents, gating_decision)
 
-            # Update pipeline status
-            pipeline.status = "completed"
-            pipeline.completed_at = datetime.now(timezone.utc)
+        except (PipelineError, Exception) as e:
+            await _handle_pipeline_failure(db, pipeline, pipeline_id, e)
 
-            # Compute confidence from programmatic validation results
-            if context.validation_result:
-                from app.helpers.confidence_scorer import compute_confidence
-                validation_data = context.validation_result.get(
-                    "programmatic_validation", context.validation_result
-                )
-                confidence = compute_confidence(validation_data)
-                pipeline.confidence_grade = confidence.grade
-                pipeline.confidence_score = confidence.score
 
-            await db.commit()
+async def _apply_agent_gate(
+    context,
+    all_agents: list,
+    plan: str,
+    pipeline_id_str: str,
+) -> "GatingDecision | None":
+    """Invoke the Agent Gate with a 5-second timeout.
 
-            await broadcast_progress(str(pipeline_id), {
-                "event": "pipeline_completed",
-                "pipeline_id": str(pipeline_id),
-                "confidence_grade": pipeline.confidence_grade,
-                "duration_ms": int((pipeline.completed_at - pipeline.started_at).total_seconds() * 1000),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
+    Returns the GatingDecision on success, or None on failure/timeout
+    (falling back to dispatching all agents).
+    """
+    from app.orchestration.agent_gate import AgentGate, GatingDecision
 
-        except PipelineError as e:
-            pipeline.status = "failed"
-            pipeline.error_message = str(e)
-            pipeline.completed_at = datetime.now(timezone.utc)
-            await db.commit()
+    framing_output = context.get_agent_output("question-framing")
+    available_agents = [a.name for a in all_agents if a.name != "question-framing"]
 
-            await broadcast_progress(str(pipeline_id), {
-                "event": "pipeline_failed",
-                "pipeline_id": str(pipeline_id),
-                "error": str(e),
-                "failed_at_tier": e.tier,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
+    try:
+        gate = AgentGate()
+        decision = await asyncio.wait_for(
+            asyncio.get_event_loop().run_in_executor(
+                None, gate.evaluate, framing_output, available_agents, plan,
+            ),
+            timeout=5.0,
+        )
+        logger.info(
+            "Agent Gate decision for pipeline %s: %s/%s — dispatching %d of %d agents",
+            pipeline_id_str,
+            decision.intent.value,
+            decision.complexity.value,
+            len(decision.dispatched_agents),
+            len(available_agents),
+        )
+        return decision
 
-        except Exception as e:
-            logger.exception("Pipeline %s failed unexpectedly", pipeline_id)
-            pipeline.status = "failed"
-            pipeline.error_message = f"Unexpected error: {str(e)}"
-            pipeline.completed_at = datetime.now(timezone.utc)
-            await db.commit()
+    except asyncio.TimeoutError:
+        logger.error(
+            "Agent Gate timed out (>5s) for pipeline %s. "
+            "Falling back to all agents.",
+            pipeline_id_str,
+        )
+        return None
 
-            await broadcast_progress(str(pipeline_id), {
-                "event": "pipeline_failed",
-                "pipeline_id": str(pipeline_id),
-                "error": str(e),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
+    except Exception as exc:
+        logger.error(
+            "Agent Gate failed for pipeline %s: %s. "
+            "Falling back to all agents.",
+            pipeline_id_str,
+            exc,
+        )
+        return None
 
 
 async def _update_agent_status(
