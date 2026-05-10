@@ -21,8 +21,56 @@ from app.models.result import AnalysisResult
 from app.models.user import User
 from app.rate_limit import limiter
 from app.services.auth import get_current_user
+from app.services.result_builder import normalize_finding
 
 router = APIRouter(prefix="/results", tags=["results"])
+
+
+def _normalize_narrative(narrative: dict) -> dict:
+    """Ensure narrative fields are strings, not nested objects/arrays.
+
+    The storytelling agent may return detailed_findings as a list of
+    finding objects instead of a markdown string. This normalizes it.
+    """
+    result = dict(narrative)
+
+    # Normalize executive_summary
+    summary = result.get("executive_summary")
+    if summary is not None and not isinstance(summary, str):
+        if isinstance(summary, list):
+            result["executive_summary"] = "\n".join(
+                str(item) if not isinstance(item, dict) else (item.get("text") or item.get("summary") or str(item))
+                for item in summary
+            )
+        else:
+            result["executive_summary"] = str(summary)
+
+    # Normalize detailed_findings
+    findings = result.get("detailed_findings")
+    if findings is not None and not isinstance(findings, str):
+        if isinstance(findings, list):
+            parts = []
+            for item in findings:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    title = item.get("title") or item.get("headline") or ""
+                    body = item.get("narrative") or item.get("detail") or item.get("description") or ""
+                    if title and body:
+                        parts.append(f"**{title}**\n{body}")
+                    elif title:
+                        parts.append(f"**{title}**")
+                    elif body:
+                        parts.append(str(body))
+                    else:
+                        parts.append(str(item))
+                else:
+                    parts.append(str(item))
+            result["detailed_findings"] = "\n\n".join(parts)
+        else:
+            result["detailed_findings"] = str(findings)
+
+    return result
 
 
 async def _get_pipeline_with_results(
@@ -142,6 +190,18 @@ async def get_results(
     cache_key = make_cache_key("results", str(pipeline_id), str(user.id))
     cached = await cache_get(cache_key)
     if cached is not None:
+        # Normalize findings in cached response (handles pre-normalization data)
+        if isinstance(cached, dict) and "data" in cached:
+            raw_findings = cached["data"].get("findings", [])
+            if raw_findings and isinstance(raw_findings, list):
+                cached["data"]["findings"] = [
+                    normalize_finding(f, "unknown") if isinstance(f, dict) else f
+                    for f in raw_findings
+                ]
+            # Normalize narrative in cached response
+            raw_narrative = cached["data"].get("narrative")
+            if isinstance(raw_narrative, dict):
+                cached["data"]["narrative"] = _normalize_narrative(raw_narrative)
         return cached
 
     pipeline, results = await _get_pipeline_with_results(pipeline_id, user.id, db)
@@ -152,7 +212,11 @@ async def get_results(
     dataset_name = dataset.name if dataset else "Unknown"
 
     # Categorize results
-    findings = [r.content for r in results if r.result_type == "finding" and r.content]
+    findings = [
+        normalize_finding(r.content, "unknown")
+        for r in results
+        if r.result_type == "finding" and r.content and isinstance(r.content, dict)
+    ]
     charts = []
     for r in results:
         if r.result_type == "chart" and r.content:
@@ -162,6 +226,10 @@ async def get_results(
 
     narrative_results = [r for r in results if r.result_type == "narrative"]
     narrative = narrative_results[0].content if narrative_results else None
+
+    # Normalize narrative: ensure detailed_findings is a string
+    if isinstance(narrative, dict):
+        narrative = _normalize_narrative(narrative)
 
     validation_results = [r for r in results if r.result_type == "validation"]
     validation = validation_results[0].content if validation_results else None
@@ -264,11 +332,23 @@ async def get_findings(
     cache_key = make_cache_key("findings", str(pipeline_id), str(user.id))
     cached = await cache_get(cache_key)
     if cached is not None:
+        # Normalize findings in cached response (handles pre-normalization data)
+        if isinstance(cached, dict) and "data" in cached:
+            raw_findings = cached["data"]
+            if isinstance(raw_findings, list):
+                cached["data"] = [
+                    normalize_finding(f, "unknown") if isinstance(f, dict) else f
+                    for f in raw_findings
+                ]
         return cached
 
     _, results = await _get_pipeline_with_results(pipeline_id, user.id, db)
 
-    findings = [r.content for r in results if r.result_type == "finding" and r.content]
+    findings = [
+        normalize_finding(r.content, "unknown")
+        for r in results
+        if r.result_type == "finding" and r.content and isinstance(r.content, dict)
+    ]
     response = {"data": findings}
 
     # Cache for 1 hour if we have findings
@@ -519,6 +599,11 @@ async def get_narrative(
 
     narrative_results = [r for r in results if r.result_type == "narrative"]
     narrative = narrative_results[0].content if narrative_results else None
+
+    # Normalize narrative: ensure detailed_findings is a string
+    if isinstance(narrative, dict):
+        narrative = _normalize_narrative(narrative)
+
     response = {"data": narrative}
 
     # Cache for 1 hour if narrative exists

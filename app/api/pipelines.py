@@ -154,12 +154,16 @@ async def create_pipeline(
                 },
             )
 
+    # Auto-select plan based on question complexity
+    from app.orchestration.plan_selector import auto_select_plan
+    effective_plan = auto_select_plan(body.question, body.plan)
+
     # Create pipeline run
     pipeline = PipelineRun(
         user_id=user.id,
         dataset_id=body.dataset_id,
         question=body.question,
-        execution_plan=body.plan,
+        execution_plan=effective_plan,
         model_selection=body.model,
         status="queued",
     )
@@ -170,7 +174,7 @@ async def create_pipeline(
     task = asyncio.create_task(
         _run_pipeline(
             pipeline.id, dataset, user.id, body.question,
-            body.plan, body.model, body.force_full_analysis,
+            effective_plan, body.model, body.force_full_analysis,
         )
     )
     _background_tasks.add(task)
@@ -738,6 +742,14 @@ async def _run_pipeline(
             all_agents = load_registry()
             agents = filter_agents_by_plan(all_agents, plan)
 
+            # For lightweight plans, strip dependencies that reference agents
+            # not in the plan (they won't run, so deps are pre-satisfied)
+            if plan == "quick_overview":
+                plan_agent_names = {a.name for a in agents}
+                for agent in agents:
+                    agent.depends_on = [d for d in agent.depends_on if d in plan_agent_names]
+                    agent.depends_on_any = [d for d in agent.depends_on_any if d in plan_agent_names]
+
             # Resolve model assignments
             router = ModelRouter()
             assignments = router.resolve_assignments(
@@ -778,9 +790,15 @@ async def _run_pipeline(
                     tier1_agents, context, execute_agent_with_model, on_progress,
                 )
 
+            # Remove satisfied dependencies (tier 1 agents already executed)
+            executed_names = {a.name for a in tier1_agents}
+            for agent in remaining_agents:
+                agent.depends_on = [d for d in agent.depends_on if d not in executed_names]
+                agent.depends_on_any = [d for d in agent.depends_on_any if d not in executed_names]
+
             # Apply Agent Gate
             gating_decision = None
-            bypass_gating = force_full_analysis or plan == "validate_only"
+            bypass_gating = force_full_analysis or plan in ("validate_only", "quick_overview")
 
             if remaining_agents and not bypass_gating:
                 remaining_agents, gating_decision = await _apply_gating_and_filter(
@@ -815,6 +833,10 @@ async def _apply_agent_gate(
     from app.orchestration.agent_gate import AgentGate, GatingDecision
 
     framing_output = context.get_agent_output("question-framing")
+    # Extract the inner output dict — agent outputs are wrapped as
+    # {"agent": "...", "output": {...}, "llm_usage": {...}}
+    if isinstance(framing_output, dict) and "output" in framing_output:
+        framing_output = framing_output["output"]
     available_agents = [a.name for a in all_agents if a.name != "question-framing"]
 
     try:

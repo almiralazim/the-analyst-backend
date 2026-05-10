@@ -112,6 +112,15 @@ def filter_agents_by_plan(agents: list[AgentNode], plan: str) -> list[AgentNode]
         }
         return [a for a in agents if a.name in mvp_agents]
 
+    if plan == "quick_overview":
+        # Lightweight plan for simple exploratory questions
+        # Only 4 agents: framing → data-explorer → descriptive-analytics → storytelling
+        overview_agents = {
+            "question-framing", "data-explorer",
+            "descriptive-analytics", "storytelling",
+        }
+        return [a for a in agents if a.name in overview_agents]
+
     return agents
 
 

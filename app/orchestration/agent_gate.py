@@ -76,28 +76,70 @@ def _extract_hypotheses(framing_output: dict) -> list[Any]:
 
 
 def _extract_dimensions(framing_output: dict) -> list[Any]:
-    """Safely extract dimensions list from framing output."""
+    """Safely extract dimensions from framing output.
+
+    Maps from the actual schema: sub_questions act as analytical dimensions.
+    Falls back to the legacy 'dimensions' key if present.
+    """
+    # Try legacy key first
     dimensions = framing_output.get("dimensions")
     if isinstance(dimensions, list):
         return dimensions
+    # Derive from sub_questions (each is an analytical dimension)
+    sub_questions = framing_output.get("sub_questions")
+    if isinstance(sub_questions, list):
+        return sub_questions
     return []
 
 
 def _extract_comparative_dimensions(framing_output: dict) -> list[Any]:
-    """Safely extract comparative_dimensions list from framing output."""
+    """Safely extract comparative dimensions from framing output.
+
+    Derives from sub_questions with analysis_type 'comparison'.
+    Falls back to the legacy 'comparative_dimensions' key.
+    """
+    # Try legacy key first
     comparative = framing_output.get("comparative_dimensions")
     if isinstance(comparative, list):
         return comparative
+    # Derive from sub_questions with comparison type
+    sub_questions = framing_output.get("sub_questions")
+    if isinstance(sub_questions, list):
+        return [
+            sq for sq in sub_questions
+            if isinstance(sq, dict) and sq.get("analysis_type") == "comparison"
+        ]
     return []
 
 
-def _has_temporal_scope(framing_output: dict) -> bool:
-    """Check if temporal scope is present and non-empty."""
-    temporal = framing_output.get("temporal_scope")
-    if temporal is None:
-        return False
+def _has_temporal_from_legacy(temporal: Any) -> bool:
+    """Check if the legacy temporal_scope value indicates a temporal scope."""
     if isinstance(temporal, dict) and len(temporal) > 0:
         return True
+    return isinstance(temporal, str) and bool(temporal)
+
+
+def _has_temporal_from_sub_questions(sub_questions: list[Any]) -> bool:
+    """Check if any sub_question has analysis_type 'trend'."""
+    return any(
+        isinstance(sq, dict) and sq.get("analysis_type") == "trend"
+        for sq in sub_questions
+    )
+
+
+def _has_temporal_scope(framing_output: dict) -> bool:
+    """Check if temporal scope is present.
+
+    Checks the legacy 'temporal_scope' key, or derives from sub_questions
+    that have analysis_type 'trend' or mention time-related terms.
+    """
+    temporal = framing_output.get("temporal_scope")
+    if temporal is not None and _has_temporal_from_legacy(temporal):
+        return True
+
+    sub_questions = framing_output.get("sub_questions")
+    if isinstance(sub_questions, list):
+        return _has_temporal_from_sub_questions(sub_questions)
     return False
 
 
@@ -224,23 +266,32 @@ def classify_complexity(framing_output: dict) -> ComplexityLevel:
 
 
 def _is_valid_framing_output(framing_output: Any) -> bool:
-    """Check if framing_output is a well-formed dict with required fields.
+    """Check if framing_output is a well-formed dict with usable fields.
 
-    Required fields: hypotheses, dimensions, temporal_scope.
-    Each must be present as a key (value can be None for temporal_scope).
+    Accepts both the legacy schema (hypotheses, dimensions, temporal_scope)
+    and the actual schema (hypotheses, sub_questions, recommended_complexity).
     """
     if not isinstance(framing_output, dict):
         return False
 
-    required_keys = {"hypotheses", "dimensions", "temporal_scope"}
-    if not required_keys.issubset(framing_output.keys()):
+    # Must have at least one of the key signal sources
+    has_hypotheses_key = "hypotheses" in framing_output
+    has_sub_questions_key = "sub_questions" in framing_output
+    has_dimensions_key = "dimensions" in framing_output
+
+    if not (has_hypotheses_key or has_sub_questions_key or has_dimensions_key):
         return False
 
-    # hypotheses and dimensions must be lists (or at least not completely wrong types)
+    # Validate types if present
     hypotheses = framing_output.get("hypotheses")
-    dimensions = framing_output.get("dimensions")
     if hypotheses is not None and not isinstance(hypotheses, list):
         return False
+
+    sub_questions = framing_output.get("sub_questions")
+    if sub_questions is not None and not isinstance(sub_questions, list):
+        return False
+
+    dimensions = framing_output.get("dimensions")
     if dimensions is not None and not isinstance(dimensions, list):
         return False
 
@@ -306,6 +357,16 @@ class AgentGate:
         intent = classify_intent(framing_output)
         complexity = classify_complexity(framing_output)
 
+        # Cap complexity for simple intents: overview questions should never
+        # trigger a full agent dispatch just because the LLM over-generated
+        # hypotheses. Cap at MEDIUM so the relevance map controls dispatch.
+        if intent == IntentCategory.OVERVIEW and complexity == ComplexityLevel.HIGH:
+            logger.info(
+                "Capping complexity from HIGH to MEDIUM for overview intent "
+                "(LLM likely over-generated hypotheses for a simple question)"
+            )
+            complexity = ComplexityLevel.MEDIUM
+
         # Determine dispatched agents
         if complexity == ComplexityLevel.HIGH:
             dispatched = set(available_agents)
@@ -340,24 +401,9 @@ class AgentGate:
 
         # Build the dispatched and skipped lists
         dispatched_list = sorted(dispatched)
-        skipped_agents: list[SkippedAgent] = []
-        tier_map = {a.name: a.tier for a in self._registry_agents}
-        for agent_name in available_agents:
-            if agent_name not in dispatched:
-                reason = self._build_skip_reason(
-                    agent_name, intent, complexity
-                )
-                agent_tier = tier_map.get(agent_name)
-                # tier of -1 means unresolved; treat as None
-                if agent_tier is not None and agent_tier < 0:
-                    agent_tier = None
-                skipped_agents.append(
-                    SkippedAgent(
-                        name=agent_name,
-                        tier=agent_tier,
-                        reason=reason,
-                    )
-                )
+        skipped_agents = self._build_skipped_agents(
+            available_agents, dispatched, intent, complexity
+        )
 
         duration_ms = (time.perf_counter_ns() - start_ns) // 1_000_000
 
@@ -375,6 +421,26 @@ class AgentGate:
             gate_duration_ms=duration_ms,
             reasoning=reasoning,
         )
+
+    def _build_skipped_agents(
+        self,
+        available_agents: list[str],
+        dispatched: set[str],
+        intent: IntentCategory,
+        complexity: ComplexityLevel,
+    ) -> list[SkippedAgent]:
+        """Build the list of agents that were excluded from dispatch."""
+        tier_map = {a.name: a.tier for a in self._registry_agents}
+        skipped: list[SkippedAgent] = []
+        for agent_name in available_agents:
+            if agent_name in dispatched:
+                continue
+            reason = self._build_skip_reason(agent_name, intent, complexity)
+            agent_tier = tier_map.get(agent_name)
+            if agent_tier is not None and agent_tier < 0:
+                agent_tier = None
+            skipped.append(SkippedAgent(name=agent_name, tier=agent_tier, reason=reason))
+        return skipped
 
     def _cap_agents(
         self, dispatched: set[str], available_agents: list[str]
