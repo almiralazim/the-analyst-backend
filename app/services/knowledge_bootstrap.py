@@ -22,7 +22,7 @@ async def bootstrap_context(
 ) -> PipelineContext:
     """Build a fully loaded PipelineContext with knowledge from the database.
 
-    This is the enterprise equivalent of ai-analyst's Knowledge Bootstrap skill.
+    This is the enterprise equivalent of the-analyst's Knowledge Bootstrap skill.
     It loads corrections, learnings, and user preferences so agents have
     full context from the first prompt.
     """

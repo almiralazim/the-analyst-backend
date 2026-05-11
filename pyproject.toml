@@ -1,5 +1,5 @@
 [project]
-name = "ai-analyst-backend"
+name = "the-analyst-backend"
 version = "0.1.0"
 description = "The Analyst Platform — Backend API, Orchestration, and Agent Pipeline"
 requires-python = ">=3.11"
@@ -8,61 +8,51 @@ dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.30.0",
     "python-multipart>=0.0.9",
-
     # Database
     "sqlalchemy[asyncio]>=2.0.30",
     "asyncpg>=0.29.0",
     "alembic>=1.13.0",
     "greenlet>=3.0.0",
-
     # Redis
     "redis[hiredis]>=5.0.0",
-
     # Auth
     "python-jose[cryptography]>=3.3.0",
     "passlib[bcrypt]>=1.7.4",
     "bcrypt>=4.0.0,<5.0.0",
-
     # LLM Providers
     "anthropic>=0.39.0",
     "openai>=1.50.0",
     "google-genai>=1.0.0",
     "groq>=0.11.0",
-
-    # Data processing (ported from ai-analyst)
+    # Data processing (ported from the-analyst)
     "pandas>=2.2.0",
     "duckdb>=1.1.0",
     "openpyxl>=3.1.0",
     "xlrd>=2.0.0",
-
     # SQL parsing and validation
     "sqlglot>=26.0.0",
-
-    # Charts (ported from ai-analyst)
+    # Charts (ported from the-analyst)
     "matplotlib>=3.9.0",
     "seaborn>=0.13.0",
-
-    # Statistics (ported from ai-analyst)
+    # Statistics (ported from the-analyst)
     "scipy>=1.13.0",
     "numpy>=1.26.0",
-
     # Export
     "jinja2>=3.1.0",
     "python-docx>=1.1.0",
-
     # Resilience & middleware
     "tenacity>=8.2.0",
     "slowapi>=0.1.9",
-
     # Logging
     "python-json-logger>=2.0.0",
-
     # Utilities
     "pydantic>=2.8.0",
     "pydantic-settings>=2.4.0",
     "pyyaml>=6.0.0",
     "python-dateutil>=2.9.0",
     "chardet>=5.2.0",
+    "ruff>=0.15.12",
+    "pytest>=9.0.3",
 ]
 
 [project.optional-dependencies]

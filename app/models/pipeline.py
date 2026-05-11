@@ -30,6 +30,7 @@ class PipelineRun(Base):
     question: Mapped[str] = mapped_column(Text, nullable=False)
     complexity: Mapped[str | None] = mapped_column(String(5))
     execution_plan: Mapped[str | None] = mapped_column(String(50))
+    model_selection: Mapped[str | None] = mapped_column(String(100), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="queued")
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

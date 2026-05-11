@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     )
 
     # Application
-    app_name: str = "ai-analyst-api"
+    app_name: str = "the-analyst-api"
     app_version: str = "0.1.0"
     debug: bool = False
 
@@ -88,6 +88,10 @@ class Settings(BaseSettings):
     rate_limit_default: str = "60/minute"
     rate_limit_heavy: str = "10/minute"
 
+    # Cache
+    llm_cache_enabled: bool = False
+    llm_cache_ttl_seconds: int = 3600
+
     @field_validator("secret_key")
     @classmethod
     def _reject_insecure_secret(cls, v: str) -> str:
@@ -125,3 +129,64 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+# ---------------------------------------------------------------------------
+# Environment safety checks — warn about risky configurations
+# ---------------------------------------------------------------------------
+
+def _run_environment_checks() -> None:
+    """Emit warnings for configurations that are unsafe in production.
+
+    These checks run at import time (app startup). They log warnings
+    but never prevent the app from starting.
+    """
+    import warnings
+
+    is_production = not settings.debug
+
+    if is_production and settings.llm_cache_enabled:
+        warnings.warn(
+            "LLM_CACHE_ENABLED=true in production (DEBUG=false). "
+            "Users may receive stale cached analysis instead of fresh results. "
+            "Set LLM_CACHE_ENABLED=false for production deployments.",
+            stacklevel=1,
+        )
+
+    if is_production and settings.debug:
+        # This can't actually trigger (debug=False means is_production=True),
+        # but guard against future logic changes.
+        pass
+
+    # Check that at least one LLM provider has an API key
+    has_llm_key = any([
+        settings.anthropic_api_key,
+        settings.openai_api_key,
+        settings.gemini_api_key,
+        settings.groq_api_key,
+    ])
+    if not has_llm_key:
+        warnings.warn(
+            "No LLM API key configured. Pipeline execution will fail. "
+            "Set at least one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, "
+            "GEMINI_API_KEY, GROQ_API_KEY.",
+            stacklevel=1,
+        )
+
+    # Check CORS origins for wildcard in production
+    if is_production:
+        origins = settings.cors_origin_list
+        if "*" in origins:
+            warnings.warn(
+                "CORS_ORIGINS contains '*' (allow all origins) in production. "
+                "This is a security risk. Set CORS_ORIGINS to your frontend domain(s) only.",
+                stacklevel=1,
+            )
+
+    # Check DEBUG mode exposes sensitive info
+    if settings.debug:
+        # Not a problem per se, but worth noting
+        pass
+
+
+_run_environment_checks()

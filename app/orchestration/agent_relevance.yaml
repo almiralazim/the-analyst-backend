@@ -1,0 +1,81 @@
+version: 1
+
+# Agents always dispatched regardless of classification
+mandatory_agents:
+  - data-explorer
+  - storytelling
+
+# Mapping: intent + complexity -> additional agents to dispatch
+# question-framing is always tier 1 and runs before gating
+rules:
+  overview:
+    low:
+      - descriptive-analytics
+      - chart-maker
+    medium:
+      - descriptive-analytics
+      - chart-maker
+      - source-tieout
+    high: all
+
+  trend_analysis:
+    low:
+      - overtime-trend
+      - chart-maker
+    medium:
+      - overtime-trend
+      - descriptive-analytics
+      - chart-maker
+      - source-tieout
+    high: all
+
+  hypothesis_testing:
+    low:
+      - hypothesis
+      - descriptive-analytics
+      - chart-maker
+    medium:
+      - hypothesis
+      - root-cause-investigator
+      - descriptive-analytics
+      - chart-maker
+      - source-tieout
+    high: all
+
+  root_cause_investigation:
+    low:
+      - hypothesis
+      - root-cause-investigator
+      - chart-maker
+    medium:
+      - hypothesis
+      - root-cause-investigator
+      - descriptive-analytics
+      - overtime-trend
+      - chart-maker
+      - source-tieout
+    high: all
+
+  comparison:
+    low:
+      - descriptive-analytics
+      - chart-maker
+    medium:
+      - descriptive-analytics
+      - overtime-trend
+      - chart-maker
+      - source-tieout
+    high: all
+
+  anomaly_detection:
+    low:
+      - descriptive-analytics
+      - overtime-trend
+      - chart-maker
+    medium:
+      - descriptive-analytics
+      - overtime-trend
+      - hypothesis
+      - chart-maker
+      - source-tieout
+    high: all

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from app.agents.base import BaseAgent
 from app.llm import get_llm_provider
 from app.orchestration.context import PipelineContext
+
+if TYPE_CHECKING:
+    from app.llm.base import LLMProvider
 
 logger = logging.getLogger(__name__)
 
@@ -22,17 +25,18 @@ def register_agent(cls: type[BaseAgent]) -> type[BaseAgent]:
     return cls
 
 
-def get_agent(name: str) -> BaseAgent:
-    """Get an agent instance by name."""
+def get_agent(name: str, llm: "LLMProvider | None" = None) -> BaseAgent:
+    """Get an agent instance by name, optionally with a specific LLM provider."""
     if name not in _AGENT_REGISTRY:
         logger.warning("No specific implementation for agent '%s', using generic", name)
-        return GenericAgent(agent_name=name)
-    return _AGENT_REGISTRY[name]()
+        return GenericAgent(agent_name=name, llm=llm)
+    cls = _AGENT_REGISTRY[name]
+    return cls(llm=llm) if llm else cls()
 
 
-async def execute_agent(agent_name: str, context: PipelineContext) -> dict:
+async def execute_agent(agent_name: str, context: PipelineContext, llm: "LLMProvider | None" = None) -> dict:
     """Execute a named agent with the given context."""
-    agent = get_agent(agent_name)
+    agent = get_agent(agent_name, llm=llm)
     return await agent.execute(context)
 
 

@@ -7,6 +7,7 @@ import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
 
+from app.config import settings
 from app.llm import LLMProvider, LLMResponse, get_llm_provider
 from app.llm.prompt_renderer import render_prompt
 from app.orchestration.context import PipelineContext
@@ -51,9 +52,9 @@ class BaseAgent(ABC):
         corrections_text = context.format_corrections_for_prompt()
         prompt = f"{prompt}\n\n{corrections_text}"
 
-        # Call LLM
+        # Call LLM (with optional caching)
         logger.info("Agent %s calling LLM (%s)", self.name, self.llm.provider_name)
-        response = await self.llm.complete(prompt, system=self.system_prompt)
+        response = await self._call_llm_with_cache(prompt)
         logger.info(
             "Agent %s LLM response: %d tokens in, %d tokens out",
             self.name, response.input_tokens, response.output_tokens,
@@ -107,10 +108,63 @@ class BaseAgent(ABC):
         except json.JSONDecodeError:
             return {"raw_text": response.content, "parsed": False}
 
-    def run_helpers(self, parsed: dict, context: PipelineContext) -> dict:
+    async def run_helpers(self, parsed: dict, context: PipelineContext) -> dict:
         """Run helper modules on the parsed LLM output.
 
         Override in subclasses to call specific helpers (chart generation,
         validation, SQL execution, etc.).
+
+        This method is async so subclasses can use await without changing
+        the call signature in execute().
         """
-        return parsed
+        return parsed  # noqa: RUF029 — async required for subclass overrides
+
+    async def _call_llm_with_cache(self, prompt: str) -> LLMResponse:
+        """Call LLM with optional response caching for development use."""
+        if not settings.llm_cache_enabled:
+            return await self.llm.complete(prompt, system=self.system_prompt)
+
+        from app.cache import cache_get, cache_set, hash_content, make_cache_key
+
+        # Build a cache key from prompt + system + model + provider
+        content_hash = hash_content(
+            f"{prompt}|{self.system_prompt}|{getattr(self.llm, 'model', '')}|{self.llm.provider_name}"
+        )
+        cache_key = make_cache_key("llm", self.name, content_hash)
+
+        # Check cache
+        cached = await cache_get(cache_key)
+        if cached is not None:
+            logger.info("Agent %s LLM cache hit", self.name)
+            content = cached.get("content", "")
+            if not isinstance(content, str):
+                content = ""
+            return LLMResponse(
+                content=content,
+                model=cached.get("model", "cached"),
+                provider=cached.get("provider", "cache"),
+                input_tokens=cached.get("input_tokens", 0),
+                output_tokens=cached.get("output_tokens", 0),
+                total_tokens=cached.get("total_tokens", 0),
+                finish_reason=cached.get("finish_reason", "cached"),
+            )
+
+        # Cache miss — call LLM
+        response = await self.llm.complete(prompt, system=self.system_prompt)
+
+        # Store in cache
+        await cache_set(
+            cache_key,
+            {
+                "content": response.content,
+                "model": response.model,
+                "provider": response.provider,
+                "input_tokens": response.input_tokens,
+                "output_tokens": response.output_tokens,
+                "total_tokens": response.total_tokens,
+                "finish_reason": response.finish_reason,
+            },
+            ttl_seconds=settings.llm_cache_ttl_seconds,
+        )
+
+        return response

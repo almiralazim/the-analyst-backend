@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import re
 import uuid
+from collections.abc import AsyncGenerator
 
 # Set test environment variables before importing any app modules.
 # This ensures app/config.py picks up test values instead of production ones.
@@ -104,7 +105,11 @@ from app.models import (  # noqa: E402, F401
     Correction,
     Learning,
 )
+from app.rate_limit import limiter  # noqa: E402
 from main import app  # noqa: E402
+
+# Disable rate limiting in tests to avoid Redis dependency and cross-test state leakage
+limiter.enabled = False
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +123,7 @@ def anyio_backend():
 
 
 @pytest_asyncio.fixture(scope="function")
-async def db_tables():
+async def db_tables() -> AsyncGenerator[None]:
     """Create all tables before a test and drop them after."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -128,14 +133,18 @@ async def db_tables():
 
 
 @pytest_asyncio.fixture(scope="function")
-async def db_session(db_tables) -> AsyncSession:
+async def db_session(
+    db_tables,
+) -> AsyncGenerator[AsyncSession]:
     """Yield an async database session scoped to a single test."""
     async with TestingSessionLocal() as session:
         yield session
 
 
 @pytest_asyncio.fixture(scope="function")
-async def client(db_tables) -> AsyncClient:
+async def client(  # type: ignore[misc]
+    db_tables,
+) -> AsyncGenerator[AsyncClient, None]:
     """Async HTTP client wired to the FastAPI app with the test database.
 
     Overrides the ``get_db`` dependency so all requests use the test
@@ -154,7 +163,9 @@ async def client(db_tables) -> AsyncClient:
     app.dependency_overrides[get_db] = _override_get_db
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(
+        transport=transport, base_url="http://testserver",
+    ) as ac:
         yield ac
 
     app.dependency_overrides.clear()

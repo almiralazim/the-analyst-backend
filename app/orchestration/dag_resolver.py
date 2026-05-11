@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -102,10 +105,71 @@ def filter_agents_by_plan(agents: list[AgentNode], plan: str) -> list[AgentNode]
     if plan == "deep_dive":
         # Include the 10 MVP agents
         mvp_agents = {
-            "question-framing", "hypothesis", "data-explorer", "source-tieout",
-            "descriptive-analytics", "overtime-trend", "root-cause-investigator",
-            "validation", "chart-maker", "storytelling",
+            "question-framing", "hypothesis", "data-explorer",
+            "source-tieout", "descriptive-analytics", "overtime-trend",
+            "root-cause-investigator", "validation", "chart-maker",
+            "storytelling",
         }
         return [a for a in agents if a.name in mvp_agents]
 
+    if plan == "quick_overview":
+        # Lightweight plan for simple exploratory questions
+        # Only 4 agents: framing → data-explorer → descriptive-analytics → storytelling
+        overview_agents = {
+            "question-framing", "data-explorer",
+            "descriptive-analytics", "storytelling",
+        }
+        return [a for a in agents if a.name in overview_agents]
+
     return agents
+
+
+def resolve_gated_dependencies(
+    dispatched: set[str],
+    all_agents: list[AgentNode],
+) -> set[str]:
+    """Ensure all dependencies of dispatched agents are also dispatched.
+
+    Walks the DAG and re-includes any gated agent that is a transitive
+    dependency of a dispatched agent. Re-included agents will naturally
+    appear in earlier tiers when resolve_tiers is called on the final set.
+
+    Args:
+        dispatched: Set of agent names currently selected for dispatch.
+        all_agents: Full list of AgentNode objects from the registry.
+
+    Returns:
+        Expanded set of agent names with all transitive dependencies
+        included.
+    """
+    agent_map = {a.name: a for a in all_agents}
+    result = set(dispatched)
+
+    # BFS from each dispatched agent, collecting all transitive deps
+    queue: deque[str] = deque(
+        name for name in dispatched if name in agent_map
+    )
+    visited: set[str] = set(queue)
+
+    while queue:
+        current = queue.popleft()
+        agent = agent_map.get(current)
+        if agent is None:
+            continue
+
+        for dep in agent.depends_on:
+            if dep not in agent_map:
+                continue
+            if dep not in result:
+                logger.info(
+                    "Auto-including gated dependency '%s' "
+                    "(required by '%s')",
+                    dep,
+                    current,
+                )
+                result.add(dep)
+            if dep not in visited:
+                visited.add(dep)
+                queue.append(dep)
+
+    return result

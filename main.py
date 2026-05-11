@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from slowapi.errors import RateLimitExceeded
 
 from app.config import settings
@@ -30,17 +30,103 @@ async def lifespan(app: FastAPI):
     # Ensure storage directory exists
     settings.storage_path.mkdir(parents=True, exist_ok=True)
 
+    # Verify Redis connection (non-blocking — app starts even if Redis is down)
+    from app.cache import get_redis, close_redis
+
+    try:
+        r = get_redis()
+        await r.ping()
+        logger.info("Redis connected: %s", settings.redis_url)
+    except Exception as e:
+        logger.warning("Redis unavailable at startup (caching disabled): %s", e)
+
     yield
 
+    # Shutdown: close Redis pool
+    await close_redis()
     logger.info("Shutting down %s", settings.app_name)
 
 
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
+    description="""
+# The Analyst API
+
+A backend service that accepts CSV/Excel uploads, runs a multi-agent analytical pipeline powered by LLMs,
+and returns validated findings with confidence scoring. The system learns from corrections and accumulated
+knowledge to improve future analyses.
+
+## Core Workflow
+
+1. **Upload** a dataset (CSV/Excel) via `POST /api/v1/datasets`
+2. **Ask a question** via `POST /api/v1/pipelines` — agents execute asynchronously
+3. **Monitor progress** via WebSocket at `/api/v1/pipelines/{id}/ws` or poll status
+4. **Retrieve results** — findings, charts, narrative, and confidence grade from `/api/v1/results/{id}`
+5. **Teach the system** — log corrections and learnings via `/api/v1/knowledge/*`
+
+## Authentication
+
+All endpoints (except `/auth/register`, `/auth/login`, `/auth/refresh`, and `/health`) require a
+Bearer token in the `Authorization` header:
+
+```
+Authorization: Bearer <access_token>
+```
+
+Tokens are obtained from the auth endpoints and expire after 60 minutes. Use the refresh endpoint
+to obtain a new access token without re-authenticating.
+
+## Error Format
+
+All errors follow a consistent shape:
+
+```json
+{
+  "error": {
+    "code": "ERROR_CODE",
+    "message": "Human-readable description"
+  }
+}
+```
+
+## Rate Limiting
+
+Endpoints are rate-limited per user. When exceeded, a `429` response is returned with a
+`Retry-After` header indicating how long to wait before retrying.
+
+## WebSocket
+
+Real-time pipeline progress is available via WebSocket at:
+```
+ws://<host>/api/v1/pipelines/{pipeline_id}/ws?token=<access_token>
+```
+""",
     lifespan=lifespan,
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url="/api/v1/docs",
+    redoc_url="/api/v1/redoc",
+    openapi_tags=[
+        {
+            "name": "auth",
+            "description": "User registration, login, token refresh, and profile retrieval.",
+        },
+        {
+            "name": "datasets",
+            "description": "Upload, list, inspect, preview, and delete datasets (CSV/Excel files).",
+        },
+        {
+            "name": "pipelines",
+            "description": "Create, monitor, and cancel AI analysis pipelines. Includes WebSocket for real-time progress.",
+        },
+        {
+            "name": "results",
+            "description": "Retrieve analysis results: findings, charts, narrative, validation, and export to HTML/PDF/DOCX.",
+        },
+        {
+            "name": "knowledge",
+            "description": "Manage corrections and learnings that improve future analyses.",
+        },
+    ],
 )
 
 # Rate limiting
@@ -117,6 +203,18 @@ async def health_ready():
         checks["postgresql"] = {"status": "error", "error": str(e)}
         overall = "degraded"
 
+    # Redis
+    try:
+        from app.cache import get_redis as _get_redis
+        r = _get_redis()
+        await r.ping()
+        checks["redis"] = {"status": "ok"}
+    except Exception as e:
+        checks["redis"] = {"status": "error", "error": str(e)}
+        # Redis being down is degraded, not fatal
+        if overall == "ready":
+            overall = "degraded"
+
     # LLM provider
     checks["llm_provider"] = {
         "status": "ok",
@@ -148,6 +246,7 @@ from app.api.datasets import router as datasets_router
 from app.api.pipelines import router as pipelines_router
 from app.api.results import router as results_router
 from app.api.knowledge import router as knowledge_router
+from app.api.models import router as models_router
 
 _API_PREFIX = "/api/v1"
 
@@ -156,3 +255,45 @@ app.include_router(datasets_router, prefix=_API_PREFIX)
 app.include_router(pipelines_router, prefix=_API_PREFIX)
 app.include_router(results_router, prefix=_API_PREFIX)
 app.include_router(knowledge_router, prefix=_API_PREFIX)
+app.include_router(models_router, prefix=_API_PREFIX)
+
+
+# ---------------------------------------------------------------------------
+# Redirect legacy /docs and /redoc to the versioned paths
+# ---------------------------------------------------------------------------
+
+
+@app.get("/docs", include_in_schema=False)
+async def _redirect_docs():
+    return RedirectResponse(url="/api/v1/docs")
+
+
+@app.get("/redoc", include_in_schema=False)
+async def _redirect_redoc():
+    return RedirectResponse(url="/api/v1/redoc")
+
+
+# ---------------------------------------------------------------------------
+# Patch OpenAPI schema so Swagger UI renders file upload pickers correctly.
+# FastAPI 0.115+ generates OpenAPI 3.1 with contentMediaType but Swagger UI
+# needs format: binary to show the file chooser widget.
+# ---------------------------------------------------------------------------
+
+_original_openapi = app.openapi
+
+
+def _patched_openapi():
+    schema = _original_openapi()
+    for schema_name, schema_def in schema.get("components", {}).get("schemas", {}).items():
+        for prop_name, prop in schema_def.get("properties", {}).items():
+            # Patch array items with contentMediaType to also have format: binary
+            items = prop.get("items", {})
+            if items.get("contentMediaType") == "application/octet-stream":
+                items["format"] = "binary"
+            # Patch direct properties with contentMediaType
+            if prop.get("contentMediaType") == "application/octet-stream":
+                prop["format"] = "binary"
+    return schema
+
+
+app.openapi = _patched_openapi

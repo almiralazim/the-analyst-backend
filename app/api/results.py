@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.cache import cache_get, cache_set, make_cache_key
 from app.config import settings
 from app.database import get_db
 from app.models.dataset import Dataset
@@ -20,8 +21,66 @@ from app.models.result import AnalysisResult
 from app.models.user import User
 from app.rate_limit import limiter
 from app.services.auth import get_current_user
+from app.services.result_builder import normalize_finding
 
 router = APIRouter(prefix="/results", tags=["results"])
+
+
+def _summary_item_to_str(item: object) -> str:
+    """Convert a single executive_summary list item to a string."""
+    if not isinstance(item, dict):
+        return str(item)
+    return item.get("text") or item.get("summary") or str(item)
+
+
+def _normalize_summary(summary: object) -> str:
+    """Normalize executive_summary to a plain string."""
+    if isinstance(summary, list):
+        return "\n".join(_summary_item_to_str(item) for item in summary)
+    return str(summary)
+
+
+def _finding_item_to_str(item: object) -> str:
+    """Convert a single detailed_findings list item to markdown."""
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        title = item.get("title") or item.get("headline") or ""
+        body = item.get("narrative") or item.get("detail") or item.get("description") or ""
+        if title and body:
+            return f"**{title}**\n{body}"
+        if title:
+            return f"**{title}**"
+        if body:
+            return str(body)
+        return str(item)
+    return str(item)
+
+
+def _normalize_findings(findings: object) -> str:
+    """Normalize detailed_findings to a markdown string."""
+    if isinstance(findings, list):
+        return "\n\n".join(_finding_item_to_str(item) for item in findings)
+    return str(findings)
+
+
+def _normalize_narrative(narrative: dict) -> dict:
+    """Ensure narrative fields are strings, not nested objects/arrays.
+
+    The storytelling agent may return detailed_findings as a list of
+    finding objects instead of a markdown string. This normalizes it.
+    """
+    result = dict(narrative)
+
+    summary = result.get("executive_summary")
+    if summary is not None and not isinstance(summary, str):
+        result["executive_summary"] = _normalize_summary(summary)
+
+    findings = result.get("detailed_findings")
+    if findings is not None and not isinstance(findings, str):
+        result["detailed_findings"] = _normalize_findings(findings)
+
+    return result
 
 
 async def _get_pipeline_with_results(
@@ -46,12 +105,104 @@ async def _get_pipeline_with_results(
     return pipeline, results
 
 
+def _normalize_cached_results(cached: object) -> object:
+    """Normalize findings and narrative in a cached results response."""
+    if not isinstance(cached, dict) or "data" not in cached:
+        return cached
+    raw_findings = cached["data"].get("findings", [])
+    if raw_findings and isinstance(raw_findings, list):
+        cached["data"]["findings"] = [
+            normalize_finding(f, "unknown") if isinstance(f, dict) else f
+            for f in raw_findings
+        ]
+    raw_narrative = cached["data"].get("narrative")
+    if isinstance(raw_narrative, dict):
+        cached["data"]["narrative"] = _normalize_narrative(raw_narrative)
+    return cached
+
+
+def _extract_charts(results: list, pipeline_id: uuid.UUID) -> list[dict]:
+    """Extract and enrich chart results with URLs."""
+    charts = []
+    for r in results:
+        if r.result_type == "chart" and r.content:
+            chart = dict(r.content)
+            chart["url"] = f"/api/v1/results/{pipeline_id}/charts/{chart.get('id', r.id)}"
+            charts.append(chart)
+    return charts
+
+
+def _first_result_content(results: list, result_type: str) -> object | None:
+    """Get the content of the first result matching the given type."""
+    for r in results:
+        if r.result_type == result_type:
+            return r.content
+    return None
+
+
+def _compute_duration_ms(pipeline: PipelineRun) -> int | None:
+    """Compute pipeline duration in milliseconds."""
+    if pipeline.started_at and pipeline.completed_at:
+        return int((pipeline.completed_at - pipeline.started_at).total_seconds() * 1000)
+    return None
+
+
+def _build_results_response(
+    pipeline: PipelineRun,
+    results: list,
+    pipeline_id: uuid.UUID,
+    dataset_name: str,
+) -> dict:
+    """Build the full results response dict from pipeline and results."""
+    findings = [
+        normalize_finding(r.content, "unknown")
+        for r in results
+        if r.result_type == "finding" and r.content and isinstance(r.content, dict)
+    ]
+    charts = _extract_charts(results, pipeline_id)
+
+    narrative = _first_result_content(results, "narrative")
+    if isinstance(narrative, dict):
+        narrative = _normalize_narrative(narrative)
+
+    validation = _first_result_content(results, "validation")
+
+    agent_summary = [
+        {"agent": ae.agent_name, "status": ae.status, "duration_ms": ae.duration_ms}
+        for ae in sorted(pipeline.agent_executions, key=lambda x: (x.tier or 0, x.agent_name))
+    ]
+
+    return {
+        "data": {
+            "pipeline_id": str(pipeline.id),
+            "question": pipeline.question,
+            "status": pipeline.status,
+            "confidence_grade": pipeline.confidence_grade,
+            "confidence_score": pipeline.confidence_score,
+            "duration_ms": _compute_duration_ms(pipeline),
+            "findings": findings,
+            "charts": charts,
+            "narrative": narrative,
+            "validation": validation,
+            "agent_summary": agent_summary,
+        },
+        "meta": {
+            "dataset_id": str(pipeline.dataset_id),
+            "dataset_name": dataset_name,
+            "execution_plan": pipeline.execution_plan,
+            "created_at": pipeline.created_at.isoformat() if pipeline.created_at else None,
+            "completed_at": pipeline.completed_at.isoformat() if pipeline.completed_at else None,
+        },
+    }
+
+
 @router.get(
     "/{pipeline_id}",
     summary="Get full analysis results for a pipeline",
+    response_description="Complete analysis results including findings, charts, narrative, and validation",
     responses={
-        401: {"description": "Missing or invalid access token"},
-        404: {"description": "Pipeline not found or not owned by user"},
+        401: {"description": "Missing or invalid access token", "content": {"application/json": {"example": {"error": {"code": "UNAUTHORIZED", "message": "Could not validate credentials"}}}}},
+        404: {"description": "Pipeline not found or not owned by user", "content": {"application/json": {"example": {"error": {"code": "NOT_FOUND", "message": "Pipeline not found"}}}}},
     },
 )
 @limiter.limit(settings.rate_limit_default)
@@ -136,6 +287,12 @@ async def get_results(
     - Use `validation.overall_grade` to show a confidence badge (A/B/C/D/F).
     - The `meta` section provides context about the source dataset and timing.
     """
+    # Check cache first (user-scoped to prevent auth bypass)
+    cache_key = make_cache_key("results", str(pipeline_id), str(user.id))
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        return _normalize_cached_results(cached)
+
     pipeline, results = await _get_pipeline_with_results(pipeline_id, user.id, db)
 
     # Get dataset name
@@ -143,66 +300,23 @@ async def get_results(
     dataset = ds_result.scalar_one_or_none()
     dataset_name = dataset.name if dataset else "Unknown"
 
-    # Categorize results
-    findings = [r.content for r in results if r.result_type == "finding" and r.content]
-    charts = []
-    for r in results:
-        if r.result_type == "chart" and r.content:
-            chart = dict(r.content)
-            chart["url"] = f"/api/v1/results/{pipeline_id}/charts/{chart.get('id', r.id)}"
-            charts.append(chart)
+    # Build response from results
+    response = _build_results_response(pipeline, results, pipeline_id, dataset_name)
 
-    narrative_results = [r for r in results if r.result_type == "narrative"]
-    narrative = narrative_results[0].content if narrative_results else None
+    # Cache only completed pipelines (1 hour TTL)
+    if pipeline.status == "completed":
+        await cache_set(cache_key, response, ttl_seconds=3600)
 
-    validation_results = [r for r in results if r.result_type == "validation"]
-    validation = validation_results[0].content if validation_results else None
-
-    # Agent summary
-    agent_summary = [
-        {
-            "agent": ae.agent_name,
-            "status": ae.status,
-            "duration_ms": ae.duration_ms,
-        }
-        for ae in sorted(pipeline.agent_executions, key=lambda x: (x.tier or 0, x.agent_name))
-    ]
-
-    # Compute duration
-    duration_ms = None
-    if pipeline.started_at and pipeline.completed_at:
-        duration_ms = int((pipeline.completed_at - pipeline.started_at).total_seconds() * 1000)
-
-    return {
-        "data": {
-            "pipeline_id": str(pipeline.id),
-            "question": pipeline.question,
-            "status": pipeline.status,
-            "confidence_grade": pipeline.confidence_grade,
-            "confidence_score": pipeline.confidence_score,
-            "duration_ms": duration_ms,
-            "findings": findings,
-            "charts": charts,
-            "narrative": narrative,
-            "validation": validation,
-            "agent_summary": agent_summary,
-        },
-        "meta": {
-            "dataset_id": str(pipeline.dataset_id),
-            "dataset_name": dataset_name,
-            "execution_plan": pipeline.execution_plan,
-            "created_at": pipeline.created_at.isoformat() if pipeline.created_at else None,
-            "completed_at": pipeline.completed_at.isoformat() if pipeline.completed_at else None,
-        },
-    }
+    return response
 
 
 @router.get(
     "/{pipeline_id}/findings",
     summary="Get findings only for a pipeline",
+    response_description="Array of findings (insights) extracted from the analysis",
     responses={
-        401: {"description": "Missing or invalid access token"},
-        404: {"description": "Pipeline not found or not owned by user"},
+        401: {"description": "Missing or invalid access token", "content": {"application/json": {"example": {"error": {"code": "UNAUTHORIZED", "message": "Could not validate credentials"}}}}},
+        404: {"description": "Pipeline not found or not owned by user", "content": {"application/json": {"example": {"error": {"code": "NOT_FOUND", "message": "Pipeline not found"}}}}},
     },
 )
 @limiter.limit(settings.rate_limit_default)
@@ -245,9 +359,34 @@ async def get_findings(
     - Use `confidence` (0-1) to show a confidence indicator per finding.
     - The `sources` array lists which tables/columns were used to derive the finding.
     """
+    # Check cache first (user-scoped)
+    cache_key = make_cache_key("findings", str(pipeline_id), str(user.id))
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        # Normalize findings in cached response (handles pre-normalization data)
+        if isinstance(cached, dict) and "data" in cached:
+            raw_findings = cached["data"]
+            if isinstance(raw_findings, list):
+                cached["data"] = [
+                    normalize_finding(f, "unknown") if isinstance(f, dict) else f
+                    for f in raw_findings
+                ]
+        return cached
+
     _, results = await _get_pipeline_with_results(pipeline_id, user.id, db)
-    findings = [r.content for r in results if r.result_type == "finding" and r.content]
-    return {"data": findings}
+
+    findings = [
+        normalize_finding(r.content, "unknown")
+        for r in results
+        if r.result_type == "finding" and r.content and isinstance(r.content, dict)
+    ]
+    response = {"data": findings}
+
+    # Cache for 1 hour if we have findings
+    if findings:
+        await cache_set(cache_key, response, ttl_seconds=3600)
+
+    return response
 
 
 _CHART_MEDIA_TYPES = {
@@ -260,11 +399,12 @@ _CHART_MEDIA_TYPES = {
 @router.get(
     "/{pipeline_id}/charts/{chart_id}",
     summary="Get a chart image in PNG, SVG, or PDF format",
+    response_description="Binary chart image with appropriate Content-Type header",
     responses={
-        400: {"description": "Invalid chart format requested"},
-        401: {"description": "Missing or invalid access token"},
-        404: {"description": "Pipeline or chart not found"},
-        500: {"description": "Chart format conversion failed"},
+        400: {"description": "Invalid chart format requested", "content": {"application/json": {"example": {"error": {"code": "VALIDATION_ERROR", "message": "Format must be one of: png, svg, pdf"}}}}},
+        401: {"description": "Missing or invalid access token", "content": {"application/json": {"example": {"error": {"code": "UNAUTHORIZED", "message": "Could not validate credentials"}}}}},
+        404: {"description": "Pipeline or chart not found", "content": {"application/json": {"example": {"error": {"code": "NOT_FOUND", "message": "Chart not found"}}}}},
+        500: {"description": "Chart format conversion failed", "content": {"application/json": {"example": {"error": {"code": "CONVERSION_ERROR", "message": "Chart format conversion to svg failed: ..."}}}}},
     },
 )
 @limiter.limit(settings.rate_limit_default)
@@ -432,9 +572,10 @@ async def get_chart(
 @router.get(
     "/{pipeline_id}/narrative",
     summary="Get narrative text for a pipeline",
+    response_description="Executive summary, detailed findings, and recommendations",
     responses={
-        401: {"description": "Missing or invalid access token"},
-        404: {"description": "Pipeline not found or not owned by user"},
+        401: {"description": "Missing or invalid access token", "content": {"application/json": {"example": {"error": {"code": "UNAUTHORIZED", "message": "Could not validate credentials"}}}}},
+        404: {"description": "Pipeline not found or not owned by user", "content": {"application/json": {"example": {"error": {"code": "NOT_FOUND", "message": "Pipeline not found"}}}}},
     },
 )
 @limiter.limit(settings.rate_limit_default)
@@ -479,20 +620,39 @@ async def get_narrative(
     - `recommendations` is a structured array for rendering action cards.
     - Returns `null` for `data` if the pipeline hasn't produced a narrative yet.
     """
+    # Check cache first (user-scoped)
+    cache_key = make_cache_key("narrative", str(pipeline_id), str(user.id))
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     _, results = await _get_pipeline_with_results(pipeline_id, user.id, db)
+
     narrative_results = [r for r in results if r.result_type == "narrative"]
     narrative = narrative_results[0].content if narrative_results else None
-    return {"data": narrative}
+
+    # Normalize narrative: ensure detailed_findings is a string
+    if isinstance(narrative, dict):
+        narrative = _normalize_narrative(narrative)
+
+    response = {"data": narrative}
+
+    # Cache for 1 hour if narrative exists
+    if narrative:
+        await cache_set(cache_key, response, ttl_seconds=3600)
+
+    return response
 
 
 @router.get(
     "/{pipeline_id}/export/{fmt}",
     summary="Export analysis results as HTML, PDF, or DOCX",
+    response_description="Downloadable document file with Content-Disposition header",
     responses={
-        400: {"description": "Invalid export format"},
-        401: {"description": "Missing or invalid access token"},
-        404: {"description": "Pipeline not found or not owned by user"},
-        503: {"description": "Export dependency unavailable (e.g., WeasyPrint for PDF)"},
+        400: {"description": "Invalid export format", "content": {"application/json": {"example": {"error": {"code": "VALIDATION_ERROR", "message": "Format must be one of: html, pdf, docx"}}}}},
+        401: {"description": "Missing or invalid access token", "content": {"application/json": {"example": {"error": {"code": "UNAUTHORIZED", "message": "Could not validate credentials"}}}}},
+        404: {"description": "Pipeline not found or not owned by user", "content": {"application/json": {"example": {"error": {"code": "NOT_FOUND", "message": "Pipeline not found"}}}}},
+        503: {"description": "Export dependency unavailable (e.g., WeasyPrint for PDF)", "content": {"application/json": {"example": {"error": {"code": "DEPENDENCY_UNAVAILABLE", "message": "PDF export requires WeasyPrint, which is not installed."}}}}},
     },
 )
 @limiter.limit(settings.rate_limit_default)
@@ -589,7 +749,7 @@ async def export_results(
                     "code": "DEPENDENCY_UNAVAILABLE",
                     "message": (
                         "PDF export requires WeasyPrint, which is not installed. "
-                        "Install it with: pip install 'ai-analyst-api[pdf]'"
+                        "Install it with: pip install 'the-analyst-api[pdf]'"
                     ),
                 },
             )

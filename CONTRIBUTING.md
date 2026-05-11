@@ -14,8 +14,8 @@ Thanks for your interest in contributing. This guide covers environment setup, r
 ### Clone and Install
 
 ```bash
-git clone https://github.com/<org>/ai-analyst-backend.git
-cd ai-analyst-backend
+git clone https://github.com/Creacubedusa/the-analyst-backend.git
+cd the-analyst-backend
 
 # Create a virtual environment
 python -m venv .venv
@@ -131,7 +131,7 @@ docs: update API endpoint table in README
 The backend is organized into layers, each with a clear responsibility:
 
 ```text
-ai-analyst-backend/
+the-analyst-backend/
 ├── main.py                        # FastAPI app entry point, middleware wiring
 ├── app/
 │   ├── config.py                  # Pydantic settings (env vars)

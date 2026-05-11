@@ -69,7 +69,7 @@ class TestProcessDatasetFiles:
         storage_root = tmp_path
         (storage_root / str(dataset_id)).mkdir()
 
-        result = await process_dataset_files(
+        result = process_dataset_files(
             dataset_id, [str(csv_file)], storage_root
         )
 
@@ -110,7 +110,7 @@ class TestProcessDatasetFiles:
         dataset_id = uuid.uuid4()
         (tmp_path / str(dataset_id)).mkdir()
 
-        result = await process_dataset_files(
+        result = process_dataset_files(
             dataset_id,
             [str(orders_file), str(customers_file)],
             tmp_path,
