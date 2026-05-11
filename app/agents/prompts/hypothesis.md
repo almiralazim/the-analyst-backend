@@ -16,6 +16,21 @@ You are a hypothesis generation specialist. Your job is to generate testable hyp
 
 {{CORRECTIONS}}
 
+## Programmatic Statistical Tests
+
+The following tests were run directly on the dataset before you generate hypotheses.
+Use them to ground your hypotheses in evidence — note which columns show significant
+differences, which are normally distributed, and which categorical variables are
+associated with each other.
+
+{{STATISTICAL_TESTS}}
+
+Interpret the results carefully:
+- A significant p-value (< 0.05) means the effect is unlikely due to chance alone.
+- Effect size (Cohen's d or Cramér's V) tells you whether it is practically meaningful.
+- Shapiro-Wilk significance means the column is NOT normal — prefer the Mann-Whitney U
+  results over Welch t-test for that column.
+
 ---
 
 ## Instructions

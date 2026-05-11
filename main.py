@@ -31,7 +31,7 @@ async def lifespan(app: FastAPI):
     settings.storage_path.mkdir(parents=True, exist_ok=True)
 
     # Verify Redis connection (non-blocking — app starts even if Redis is down)
-    from app.cache import get_redis, close_redis
+    from app.cache import close_redis, get_redis
 
     try:
         r = get_redis()
@@ -133,7 +133,9 @@ ws://<host>/api/v1/pipelines/{pipeline_id}/ws?token=<access_token>
 app.state.limiter = limiter
 
 
-def _rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+def _rate_limit_exceeded_handler(
+    request: Request, exc: RateLimitExceeded
+) -> JSONResponse:
     """Return a 429 response with Retry-After header when rate limit is exceeded."""
     retry_after = exc.detail or "60"
     # Extract the numeric retry window from the exception detail if possible
@@ -166,16 +168,23 @@ app.add_middleware(
 
 # --- Global error handler ---
 
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     logger.exception("Unhandled error: %s", exc)
     return JSONResponse(
         status_code=500,
-        content={"error": {"code": "INTERNAL_ERROR", "message": "An unexpected error occurred"}},
+        content={
+            "error": {
+                "code": "INTERNAL_ERROR",
+                "message": "An unexpected error occurred",
+            }
+        },
     )
 
 
 # --- Health check endpoints (no auth required) ---
+
 
 @app.get("/health")
 async def health():
@@ -189,6 +198,7 @@ async def health():
 @app.get("/health/ready")
 async def health_ready():
     from sqlalchemy import text as sa_text
+
     from app.database import engine
 
     checks = {}
@@ -206,6 +216,7 @@ async def health_ready():
     # Redis
     try:
         from app.cache import get_redis as _get_redis
+
         r = _get_redis()
         await r.ping()
         checks["redis"] = {"status": "ok"}
@@ -223,6 +234,7 @@ async def health_ready():
 
     # Storage
     import os
+
     checks["storage"] = {
         "status": "ok",
         "writable": os.access(str(settings.storage_path), os.W_OK),
@@ -243,10 +255,10 @@ async def health_ready():
 
 from app.api.auth import router as auth_router
 from app.api.datasets import router as datasets_router
-from app.api.pipelines import router as pipelines_router
-from app.api.results import router as results_router
 from app.api.knowledge import router as knowledge_router
 from app.api.models import router as models_router
+from app.api.pipelines import router as pipelines_router
+from app.api.results import router as results_router
 
 _API_PREFIX = "/api/v1"
 
@@ -284,7 +296,9 @@ _original_openapi = app.openapi
 
 def _patched_openapi():
     schema = _original_openapi()
-    for schema_name, schema_def in schema.get("components", {}).get("schemas", {}).items():
+    for schema_name, schema_def in (
+        schema.get("components", {}).get("schemas", {}).items()
+    ):
         for prop_name, prop in schema_def.get("properties", {}).items():
             # Patch array items with contentMediaType to also have format: binary
             items = prop.get("items", {})

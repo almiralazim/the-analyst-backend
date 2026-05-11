@@ -23,6 +23,8 @@ from app.helpers.analytics_helpers import (
     compute_segmentation,
     compute_top_n,
     detect_anomalies,
+    run_statistical_tests,
+    HypothesisTestResult,
     SummaryStats,
 )
 from app.helpers.validation_stack import run_validation
@@ -133,6 +135,26 @@ class DataExplorerAgent(BaseAgent):
         return parsed
 
 
+def _format_stat_tests(tests: list[HypothesisTestResult]) -> str:
+    """Format statistical test results as a prompt-ready block."""
+    if not tests:
+        return "No statistical tests computed (insufficient data or no valid column pairs)."
+    lines = []
+    for t in tests:
+        col_b_part = f"' × '{t.column_b}" if t.column_b else ""
+        sig_label = "SIGNIFICANT" if t.significant else "not significant"
+        effect_part = (
+            f", effect={t.effect_label} (size={t.effect_size:.3f})"
+            if t.effect_size is not None else ""
+        )
+        lines.append(
+            f"- [{t.test_name}] '{t.column_a}{col_b_part}' | "
+            f"stat={t.statistic:.4f}, p={t.p_value:.4f} [{sig_label}{effect_part}] | "
+            f"n={t.sample_size} | {t.interpretation}"
+        )
+    return "\n".join(lines)
+
+
 @register_agent
 class HypothesisAgent(BaseAgent):
     name = "hypothesis"
@@ -144,10 +166,37 @@ class HypothesisAgent(BaseAgent):
     )
 
     def build_prompt_context(self, context: PipelineContext) -> dict:
+        self._stat_tests: list[HypothesisTestResult] = []
+
+        if context.duckdb_path and Path(context.duckdb_path).exists():
+            try:
+                table_name = _first_table_name(context)
+                tables = (context.schema_profile or {}).get("tables", [])
+                columns = tables[0].get("columns", []) if tables else []
+                if columns:
+                    result = run_statistical_tests(
+                        context.duckdb_path, table_name, columns
+                    )
+                    self._stat_tests = result
+            except Exception:
+                logger.exception("Statistical tests failed in HypothesisAgent")
+
         return {
-            "QUESTION_BRIEF": context.get_agent_output("question-framing") or context.question,
+            "QUESTION_BRIEF": _get_question_brief(context),
             "DATA_INVENTORY": _schema_summary(context),
+            "CORRECTIONS": "\n".join(
+                f"- [{c.get('severity', 'medium').upper()}] {c.get('description', '')}"
+                for c in context.corrections
+            ) or "No corrections on record.",
+            "STATISTICAL_TESTS": _format_stat_tests(self._stat_tests),
         }
+
+    async def run_helpers(self, parsed: dict, context: PipelineContext) -> dict:
+        """Attach pre-computed statistical tests to the agent output."""
+        parsed["statistical_tests"] = [
+            asdict(t) for t in getattr(self, "_stat_tests", [])
+        ]
+        return parsed
 
 
 @register_agent

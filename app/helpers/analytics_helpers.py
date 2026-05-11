@@ -27,6 +27,12 @@ MIN_ANOMALY_POINTS: int = 10
 MIN_CORRELATION_PAIRS: int = 3
 ANOMALY_SIGMA_THRESHOLD: float = 2.0
 
+# Statistical testing
+ALPHA: float = 0.05
+MAX_CATEGORICAL_UNIQUE: int = 20
+MIN_GROUP_SIZE: int = 5
+SHAPIRO_MAX_N: int = 5000
+
 # ---------------------------------------------------------------------------
 # Data Models
 # ---------------------------------------------------------------------------
@@ -559,3 +565,378 @@ def compute_top_n(
         ))
 
     return groups
+
+
+# ---------------------------------------------------------------------------
+# Statistical hypothesis testing
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class HypothesisTestResult:
+    """Result from a single statistical hypothesis test."""
+
+    test_name: str        # "shapiro_wilk", "welch_t_test", "mann_whitney_u", "chi_squared"
+    column_a: str         # Primary column under test
+    column_b: str | None  # Secondary column (two-sample / independence tests)
+    statistic: float      # Test statistic (W, t, U, or χ²)
+    p_value: float
+    significant: bool     # p < alpha
+    effect_size: float | None   # Cohen's d or Cramér's V
+    effect_label: str | None    # "negligible", "small", "medium", "large"
+    interpretation: str         # Plain-English one-liner
+    sample_size: int
+
+
+# --- Effect-size helpers ---
+
+def _cohens_d(a: list[float], b: list[float]) -> float | None:
+    """Pooled-SD Cohen's d for two independent groups."""
+    na, nb = len(a), len(b)
+    if na < 2 or nb < 2:
+        return None
+    mean_a = sum(a) / na
+    mean_b = sum(b) / nb
+    var_a = sum((x - mean_a) ** 2 for x in a) / (na - 1)
+    var_b = sum((x - mean_b) ** 2 for x in b) / (nb - 1)
+    pooled_std = ((var_a + var_b) / 2) ** 0.5
+    if pooled_std == 0.0:
+        return 0.0
+    return abs(mean_a - mean_b) / pooled_std
+
+
+def _effect_label_d(d: float | None) -> str | None:
+    if d is None:
+        return None
+    if d >= 0.8:
+        return "large"
+    if d >= 0.5:
+        return "medium"
+    if d >= 0.2:
+        return "small"
+    return "negligible"
+
+
+def _cramers_v(chi2: float, n: int, rows: int, cols: int) -> float:
+    """Cramér's V association strength for a contingency table."""
+    denom = n * (min(rows, cols) - 1)
+    if denom <= 0:
+        return 0.0
+    return float((chi2 / denom) ** 0.5)
+
+
+def _effect_label_v(v: float) -> str:
+    if v >= 0.5:
+        return "large"
+    if v >= 0.3:
+        return "medium"
+    if v >= 0.1:
+        return "small"
+    return "negligible"
+
+
+# --- Data-fetching helpers ---
+
+def _fetch_numeric_column(
+    duckdb_path: str,
+    table_name: str,
+    col: str,
+    limit: int = SHAPIRO_MAX_N,
+) -> list[float] | QueryError:
+    sql = f'SELECT "{col}" FROM "{table_name}" WHERE "{col}" IS NOT NULL'
+    result = execute_query(duckdb_path, sql, max_rows=limit)
+    if isinstance(result, QueryError):
+        return result
+    return [float(row[0]) for row in result.rows if row[0] is not None]
+
+
+def _fetch_grouped_numeric(
+    duckdb_path: str,
+    table_name: str,
+    numeric_col: str,
+    group_col: str,
+    group_val: str,
+    limit: int = 10_000,
+) -> list[float] | QueryError:
+    safe_val = str(group_val).replace("'", "''")
+    sql = (
+        f'SELECT "{numeric_col}" FROM "{table_name}" '
+        f'WHERE CAST("{group_col}" AS VARCHAR) = \'{safe_val}\' '
+        f'AND "{numeric_col}" IS NOT NULL'
+    )
+    result = execute_query(duckdb_path, sql, max_rows=limit)
+    if isinstance(result, QueryError):
+        return result
+    return [float(row[0]) for row in result.rows if row[0] is not None]
+
+
+def _fetch_unique_group_values(
+    duckdb_path: str, table_name: str, col: str,
+) -> list[str] | QueryError:
+    sql = (
+        f'SELECT DISTINCT CAST("{col}" AS VARCHAR) FROM "{table_name}" '
+        f'WHERE "{col}" IS NOT NULL ORDER BY 1 LIMIT 2'
+    )
+    result = execute_query(duckdb_path, sql)
+    if isinstance(result, QueryError):
+        return result
+    return [str(row[0]) for row in result.rows]
+
+
+# --- Individual test runners ---
+
+def _run_shapiro_wilk(
+    duckdb_path: str,
+    table_name: str,
+    col: str,
+    alpha: float = ALPHA,
+) -> HypothesisTestResult | None:
+    """Shapiro-Wilk normality test for a numeric column (n ≤ 5000)."""
+    try:
+        from scipy import stats as sp_stats
+    except ImportError:
+        return None
+
+    values = _fetch_numeric_column(duckdb_path, table_name, col, limit=SHAPIRO_MAX_N)
+    if isinstance(values, QueryError) or len(values) < 3:
+        return None
+
+    try:
+        _sr: Any = sp_stats.shapiro(values)
+        stat_val: float = float(_sr[0])
+        p_val: float = float(_sr[1])
+    except Exception:
+        return None
+
+    significant = bool(p_val < alpha)
+    interpretation = (
+        f"'{col}' is NOT normally distributed (p={p_val:.4f}); "
+        "prefer non-parametric tests for this column"
+        if significant else
+        f"'{col}' appears normally distributed (p={p_val:.4f}); "
+        "parametric tests are appropriate"
+    )
+    return HypothesisTestResult(
+        test_name="shapiro_wilk",
+        column_a=col,
+        column_b=None,
+        statistic=round(stat_val, 6),
+        p_value=round(p_val, 6),
+        significant=significant,
+        effect_size=None,
+        effect_label=None,
+        interpretation=interpretation,
+        sample_size=len(values),
+    )
+
+
+def _run_two_sample_tests(
+    duckdb_path: str,
+    table_name: str,
+    numeric_col: str,
+    group_col: str,
+    alpha: float = ALPHA,
+) -> list[HypothesisTestResult]:
+    """Welch t-test + Mann-Whitney U between the two groups of a binary column."""
+    try:
+        from scipy import stats as sp_stats
+    except ImportError:
+        return []
+
+    group_vals = _fetch_unique_group_values(duckdb_path, table_name, group_col)
+    if isinstance(group_vals, QueryError) or len(group_vals) != 2:
+        return []
+
+    val_a, val_b = group_vals[0], group_vals[1]
+    group_a = _fetch_grouped_numeric(duckdb_path, table_name, numeric_col, group_col, val_a)
+    group_b = _fetch_grouped_numeric(duckdb_path, table_name, numeric_col, group_col, val_b)
+
+    if isinstance(group_a, QueryError) or isinstance(group_b, QueryError):
+        return []
+    if len(group_a) < MIN_GROUP_SIZE or len(group_b) < MIN_GROUP_SIZE:
+        return []
+
+    d = _cohens_d(group_a, group_b)
+    d_label = _effect_label_d(d)
+    n_total = len(group_a) + len(group_b)
+    label = f"'{numeric_col}' by '{group_col}' ({val_a!r} vs {val_b!r})"
+    results: list[HypothesisTestResult] = []
+
+    try:
+        _tr: Any = sp_stats.ttest_ind(group_a, group_b, equal_var=False)
+        t_stat: float = float(_tr[0])
+        t_p: float = float(_tr[1])
+        t_sig = bool(t_p < alpha)
+        results.append(HypothesisTestResult(
+            test_name="welch_t_test",
+            column_a=numeric_col,
+            column_b=group_col,
+            statistic=round(t_stat, 6),
+            p_value=round(t_p, 6),
+            significant=t_sig,
+            effect_size=round(d, 4) if d is not None else None,
+            effect_label=d_label,
+            interpretation=(
+                f"Significant mean difference in {label} "
+                f"(Cohen's d={d:.3f}, {d_label} effect)"
+                if t_sig else f"No significant mean difference in {label}"
+            ),
+            sample_size=n_total,
+        ))
+    except Exception:
+        pass
+
+    try:
+        _ur: Any = sp_stats.mannwhitneyu(group_a, group_b, alternative="two-sided")
+        u_stat: float = float(_ur[0])
+        u_p: float = float(_ur[1])
+        u_sig = bool(u_p < alpha)
+        results.append(HypothesisTestResult(
+            test_name="mann_whitney_u",
+            column_a=numeric_col,
+            column_b=group_col,
+            statistic=round(u_stat, 6),
+            p_value=round(u_p, 6),
+            significant=u_sig,
+            effect_size=round(d, 4) if d is not None else None,
+            effect_label=d_label,
+            interpretation=(
+                f"Significant rank-order difference in {label} "
+                f"(Cohen's d={d:.3f}, {d_label} effect)"
+                if u_sig else f"No significant rank-order difference in {label}"
+            ),
+            sample_size=n_total,
+        ))
+    except Exception:
+        pass
+
+    return results
+
+
+def _run_chi_squared(
+    duckdb_path: str,
+    table_name: str,
+    col_a: str,
+    col_b: str,
+    alpha: float = ALPHA,
+) -> HypothesisTestResult | None:
+    """Chi-squared test of independence between two categorical columns."""
+    try:
+        from scipy import stats as sp_stats
+    except ImportError:
+        return None
+
+    sql = (
+        f'SELECT CAST("{col_a}" AS VARCHAR), CAST("{col_b}" AS VARCHAR), COUNT(*) '
+        f'FROM "{table_name}" '
+        f'WHERE "{col_a}" IS NOT NULL AND "{col_b}" IS NOT NULL '
+        f'GROUP BY 1, 2 ORDER BY 1, 2'
+    )
+    result = execute_query(duckdb_path, sql)
+    if isinstance(result, QueryError) or not result.rows:
+        return None
+
+    vals_a = sorted({str(row[0]) for row in result.rows})
+    vals_b = sorted({str(row[1]) for row in result.rows})
+    if len(vals_a) < 2 or len(vals_b) < 2:
+        return None
+
+    idx_a = {v: i for i, v in enumerate(vals_a)}
+    idx_b = {v: i for i, v in enumerate(vals_b)}
+    table = [[0] * len(vals_b) for _ in range(len(vals_a))]
+    n = 0
+    for row in result.rows:
+        cnt = int(row[2])
+        table[idx_a[str(row[0])]][idx_b[str(row[1])]] += cnt
+        n += cnt
+
+    if n < MIN_GROUP_SIZE:
+        return None
+
+    try:
+        _cr: Any = sp_stats.chi2_contingency(table)
+        chi2: float = float(_cr[0])  # type: ignore[arg-type]
+        p_value: float = float(_cr[1])  # type: ignore[arg-type]
+        dof: int = int(_cr[2])  # type: ignore[arg-type]
+        v = _cramers_v(chi2, n, len(vals_a), len(vals_b))
+        v_label = _effect_label_v(v)
+        sig = bool(p_value < alpha)
+        return HypothesisTestResult(
+            test_name="chi_squared",
+            column_a=col_a,
+            column_b=col_b,
+            statistic=round(chi2, 6),
+            p_value=round(p_value, 6),
+            significant=sig,
+            effect_size=round(v, 4),
+            effect_label=v_label,
+            interpretation=(
+                f"'{col_a}' and '{col_b}' are NOT independent "
+                f"(Cramér's V={v:.3f}, {v_label} effect, dof={dof})"
+                if sig else
+                f"'{col_a}' and '{col_b}' appear independent (p={p_value:.4f})"
+            ),
+            sample_size=n,
+        )
+    except Exception:
+        return None
+
+
+def run_statistical_tests(
+    duckdb_path: str,
+    table_name: str,
+    columns: list[dict],
+    alpha: float = ALPHA,
+    max_tests: int = 10,
+) -> list[HypothesisTestResult]:
+    """Run statistical hypothesis tests automatically selected by column type.
+
+    Tests performed:
+    - Shapiro-Wilk normality for each numeric column (up to 3)
+    - Welch t-test + Mann-Whitney U for each numeric × binary-categorical pair
+    - Chi-squared independence for each categorical × categorical pair
+
+    Returns at most *max_tests* results.
+    """
+    numeric_cols = [c for c in columns if _is_numeric_type(c.get("type", ""))]
+    categorical_cols = [
+        c for c in columns
+        if not _is_numeric_type(c.get("type", ""))
+        and 2 <= c.get("unique_count", 100) <= MAX_CATEGORICAL_UNIQUE
+    ]
+    binary_cols = [c for c in categorical_cols if c.get("unique_count") == 2]
+
+    results: list[HypothesisTestResult] = []
+
+    for col_def in numeric_cols[:3]:
+        if len(results) >= max_tests:
+            break
+        test = _run_shapiro_wilk(duckdb_path, table_name, col_def["name"], alpha)
+        if test is not None:
+            results.append(test)
+
+    for num_col in numeric_cols:
+        if len(results) >= max_tests:
+            break
+        for bin_col in binary_cols:
+            if len(results) >= max_tests:
+                break
+            tests = _run_two_sample_tests(
+                duckdb_path, table_name, num_col["name"], bin_col["name"], alpha,
+            )
+            remaining = max_tests - len(results)
+            results.extend(tests[:remaining])
+
+    for i, cat_a in enumerate(categorical_cols):
+        if len(results) >= max_tests:
+            break
+        for cat_b in categorical_cols[i + 1:]:
+            if len(results) >= max_tests:
+                break
+            test = _run_chi_squared(
+                duckdb_path, table_name, cat_a["name"], cat_b["name"], alpha,
+            )
+            if test is not None:
+                results.append(test)
+
+    return results[:max_tests]
