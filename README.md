@@ -5,15 +5,17 @@ A production-ready backend that accepts CSV/Excel uploads, runs a 10-agent analy
 ## Features
 
 - **Multi-agent DAG pipeline** — 10 specialized agents execute in 7 tiers with parallel execution, timeouts, and progress streaming
+- **Agent Gate** — Intelligent agent selection that skips irrelevant agents based on question classification and dataset characteristics, reducing latency and cost
 - **4 LLM providers** — Anthropic, OpenAI, Google Gemini, Groq with automatic retry and exponential backoff
 - **Smart model routing** — Users choose a specific model or use "auto" mode where the system picks the best model per agent task (premium/standard/fast tiers)
+- **Intelligent plan selection** — Automatically selects optimal execution plans based on question type and data shape
 - **DuckDB analytics** — Per-dataset analytical engine with safe SQL execution, validation, and pre-built analytical functions
 - **4-layer validation** — Structural, logical, business rules, and Simpson's Paradox checks with A-F confidence grading
 - **Chart generation** — Matplotlib/Seaborn charts following Storytelling with Data methodology, exportable as PNG/SVG/PDF
 - **Knowledge system** — Corrections and learnings persist across sessions, injected into agent prompts
 - **Export** — HTML, PDF (WeasyPrint), and Word (python-docx) report generation
 - **Security** — JWT auth, WebSocket ownership verification, rate limiting, structured JSON logging
-- **Caching** — Redis-backed response caching for results, datasets, and LLM responses (dev mode)
+- **Caching** — Redis-backed response caching with user-scoped keys for results, datasets, and LLM responses
 - **Docker-ready** — Multi-stage Dockerfile, docker-compose with Postgres + Redis, automatic migrations and seeding
 
 ## Quick Start
@@ -36,8 +38,8 @@ make up
 # docker compose up --build -d
 
 # API available at http://localhost:8000
-# Swagger docs at http://localhost:8000/docs
-# ReDoc at http://localhost:8000/redoc
+# Swagger docs at http://localhost:8000/api/v1/docs
+# ReDoc at http://localhost:8000/api/v1/redoc
 ```
 
 ### Without Docker
@@ -232,6 +234,17 @@ Agents can execute SQL queries against uploaded datasets during pipeline runs:
 - **Analytics functions** — Summary stats, time series, segmentation, correlation, anomaly detection, top-N
 - **Query results** — Stored in pipeline context and flow to downstream agents
 
+## Agent Gate
+
+The Agent Gate intelligently skips irrelevant agents based on the user's question and dataset characteristics, reducing pipeline latency and LLM costs:
+
+1. **Question classification** — Categorizes the analytical question (comparison, trend, anomaly, distribution, correlation, general)
+2. **Dataset feature detection** — Identifies temporal columns, categorical richness, numeric density, and data shape
+3. **Relevance scoring** — Scores each agent's relevance to the question+data combination against configurable thresholds
+4. **Dynamic dispatch** — Only relevant agents execute; skipped agents are logged with reasons
+
+Configuration lives in `app/orchestration/agent_relevance.yaml`. Gating metrics are tracked for observability.
+
 ## Testing
 
 ```bash
@@ -274,6 +287,7 @@ the-analyst-backend/
 ├── entrypoint.sh                  # Docker entrypoint (migrations + seed + server)
 ├── app/
 │   ├── config.py                  # Pydantic settings (env vars, validation)
+│   ├── cache.py                   # Redis caching layer (user-scoped keys)
 │   ├── database.py                # SQLAlchemy async engine
 │   ├── logging_config.py          # Structured JSON logging
 │   ├── middleware.py              # Request ID middleware
@@ -289,6 +303,11 @@ the-analyst-backend/
 │   │   ├── dag_resolver.py        # Topological sort, tier computation
 │   │   ├── executor.py            # Tier-by-tier execution with timeouts
 │   │   ├── context.py             # Shared pipeline context
+│   │   ├── agent_gate.py          # Rule-based dynamic agent dispatch
+│   │   ├── plan_selector.py       # Intelligent execution plan selection
+│   │   ├── relevance_map.py       # Feature-to-agent relevance mapping
+│   │   ├── agent_relevance.yaml   # Agent relevance thresholds config
+│   │   ├── registry.py            # Agent metadata registry
 │   │   └── registry.yaml          # Agent definitions and dependencies
 │   ├── agents/                    # Agent implementations
 │   │   ├── base.py                # BaseAgent class
@@ -312,6 +331,8 @@ the-analyst-backend/
 │   │   ├── base.py                # Abstract interface + LLMResponse
 │   │   ├── factory.py             # Provider factory
 │   │   ├── retry.py               # Tenacity retry decorator
+│   │   ├── model_registry.py      # Centralized model metadata registry
+│   │   ├── model_router.py        # Task-complexity-based model routing
 │   │   ├── anthropic_provider.py
 │   │   ├── openai_provider.py
 │   │   ├── gemini_provider.py
@@ -362,8 +383,8 @@ All configuration is via environment variables (or `.env` file). See [.env.examp
 
 - **Getting Started**: [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) — End-to-end walkthrough
 - **API Reference**: [docs/API_REFERENCE.md](docs/API_REFERENCE.md) — Full endpoint documentation
-- **Swagger UI**: [http://localhost:8000/docs](http://localhost:8000/docs) — Interactive API explorer
-- **ReDoc**: [http://localhost:8000/redoc](http://localhost:8000/redoc) — Readable API docs
+- **Swagger UI**: [http://localhost:8000/api/v1/docs](http://localhost:8000/api/v1/docs) — Interactive API explorer
+- **ReDoc**: [http://localhost:8000/api/v1/redoc](http://localhost:8000/api/v1/redoc) — Readable API docs
 - **Contributing**: [CONTRIBUTING.md](CONTRIBUTING.md) — Dev setup and PR process
 
 ## License

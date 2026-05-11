@@ -5,6 +5,77 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0][0.2.0] - 2026-05-11
+
+### Added
+
+#### Agent Gate — Intelligent Agent Selection
+
+- Rule-based dynamic agent dispatch that skips irrelevant agents based on dataset characteristics
+- Question classification engine (comparison, trend, anomaly, distribution, correlation, general)
+- Dataset feature detection (temporal columns, categorical richness, numeric density)
+- Agent relevance scoring with configurable thresholds (`app/orchestration/agent_relevance.yaml`)
+- Gating metrics tracking for observability (agents skipped, reasons, confidence)
+- 823+ unit tests for Agent Gate classification and gating logic
+
+#### Intelligent Plan Selection
+
+- Plan selector that chooses optimal execution plans based on question type and data shape
+- Integration with Agent Gate for classification-driven plan routing
+
+#### Model Registry and Router
+
+- `app/llm/model_registry.py` — Centralized registry of all supported models with metadata (tier, context window, capabilities)
+- `app/llm/model_router.py` — Routes agents to optimal models based on task complexity tier
+- `GET /api/v1/models` endpoint for frontend model selection dropdown
+- Database migration (`002_add_model_selection`) adding `model_selection` column to pipeline runs
+
+#### Caching Layer
+
+- Redis-backed caching module (`app/cache.py`) for pipeline results, dataset details, and LLM responses
+- User-scoped cache keys to prevent cross-tenant data leakage
+- Configurable TTLs (1h for results, 5min for datasets, 1h for LLM responses in dev mode)
+
+#### Documentation
+
+- `docs/GETTING_STARTED.md` — End-to-end walkthrough from setup to first analysis
+- `docs/API_REFERENCE.md` — Comprehensive frontend integration guide with curl + TypeScript examples
+- `SECURITY.md` — Vulnerability reporting policy
+- `Makefile` with 20+ development commands (`make help` for full list)
+
+#### Testing
+
+- Agent Gate tests (`tests/test_agent_gate.py`) — 823 test cases
+- Gating metrics tests (`tests/test_gating_metrics.py`) — 250 test cases
+- Model registry tests (`tests/test_model_registry.py`) — 124 test cases
+- Model router tests (`tests/test_model_router.py`) — 169 test cases
+- Plan selector tests (`tests/test_plan_selector.py`) — 149 test cases
+- Finding normalization tests (`tests/test_finding_normalization.py`) — 150 test cases
+- Improved integration test fixtures with proper type hints and rate limit handling
+
+### Changed
+
+- Moved Swagger UI and ReDoc under `/api/v1` prefix (`/api/v1/docs`, `/api/v1/redoc`)
+- Extracted result normalization and response building into dedicated `app/services/result_builder.py`
+- Refactored DAG resolver to support dynamic agent skipping via Agent Gate
+- Updated pipeline schemas to include model selection field
+- Improved LLM factory with better provider resolution logic
+- Cleaned up unused dependencies in `pyproject.toml`
+
+### Fixed
+
+- User-scoped cache keys preventing cross-tenant data access
+- Type safety improvements across API layer
+- Rate limit handling in integration tests
+
+### Infrastructure
+
+- Alembic migration `002_add_model_selection` for model selection column
+- Orchestration registry (`app/orchestration/registry.py`) for agent metadata
+- Relevance map module (`app/orchestration/relevance_map.py`) for feature-to-agent mapping
+
+[0.2.0]: https://github.com/Creacubedusa/the-analyst-backend/compare/v0.1.0...v0.2.0
+
 ## [0.1.0][0.1.0] - 2026-05-05
 
 ### Added
