@@ -26,6 +26,44 @@ from app.services.result_builder import normalize_finding
 router = APIRouter(prefix="/results", tags=["results"])
 
 
+def _summary_item_to_str(item: object) -> str:
+    """Convert a single executive_summary list item to a string."""
+    if not isinstance(item, dict):
+        return str(item)
+    return item.get("text") or item.get("summary") or str(item)
+
+
+def _normalize_summary(summary: object) -> str:
+    """Normalize executive_summary to a plain string."""
+    if isinstance(summary, list):
+        return "\n".join(_summary_item_to_str(item) for item in summary)
+    return str(summary)
+
+
+def _finding_item_to_str(item: object) -> str:
+    """Convert a single detailed_findings list item to markdown."""
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        title = item.get("title") or item.get("headline") or ""
+        body = item.get("narrative") or item.get("detail") or item.get("description") or ""
+        if title and body:
+            return f"**{title}**\n{body}"
+        if title:
+            return f"**{title}**"
+        if body:
+            return str(body)
+        return str(item)
+    return str(item)
+
+
+def _normalize_findings(findings: object) -> str:
+    """Normalize detailed_findings to a markdown string."""
+    if isinstance(findings, list):
+        return "\n\n".join(_finding_item_to_str(item) for item in findings)
+    return str(findings)
+
+
 def _normalize_narrative(narrative: dict) -> dict:
     """Ensure narrative fields are strings, not nested objects/arrays.
 
@@ -34,41 +72,13 @@ def _normalize_narrative(narrative: dict) -> dict:
     """
     result = dict(narrative)
 
-    # Normalize executive_summary
     summary = result.get("executive_summary")
     if summary is not None and not isinstance(summary, str):
-        if isinstance(summary, list):
-            result["executive_summary"] = "\n".join(
-                str(item) if not isinstance(item, dict) else (item.get("text") or item.get("summary") or str(item))
-                for item in summary
-            )
-        else:
-            result["executive_summary"] = str(summary)
+        result["executive_summary"] = _normalize_summary(summary)
 
-    # Normalize detailed_findings
     findings = result.get("detailed_findings")
     if findings is not None and not isinstance(findings, str):
-        if isinstance(findings, list):
-            parts = []
-            for item in findings:
-                if isinstance(item, str):
-                    parts.append(item)
-                elif isinstance(item, dict):
-                    title = item.get("title") or item.get("headline") or ""
-                    body = item.get("narrative") or item.get("detail") or item.get("description") or ""
-                    if title and body:
-                        parts.append(f"**{title}**\n{body}")
-                    elif title:
-                        parts.append(f"**{title}**")
-                    elif body:
-                        parts.append(str(body))
-                    else:
-                        parts.append(str(item))
-                else:
-                    parts.append(str(item))
-            result["detailed_findings"] = "\n\n".join(parts)
-        else:
-            result["detailed_findings"] = str(findings)
+        result["detailed_findings"] = _normalize_findings(findings)
 
     return result
 
@@ -93,6 +103,97 @@ async def _get_pipeline_with_results(
     )
     results = res_result.scalars().all()
     return pipeline, results
+
+
+def _normalize_cached_results(cached: object) -> object:
+    """Normalize findings and narrative in a cached results response."""
+    if not isinstance(cached, dict) or "data" not in cached:
+        return cached
+    raw_findings = cached["data"].get("findings", [])
+    if raw_findings and isinstance(raw_findings, list):
+        cached["data"]["findings"] = [
+            normalize_finding(f, "unknown") if isinstance(f, dict) else f
+            for f in raw_findings
+        ]
+    raw_narrative = cached["data"].get("narrative")
+    if isinstance(raw_narrative, dict):
+        cached["data"]["narrative"] = _normalize_narrative(raw_narrative)
+    return cached
+
+
+def _extract_charts(results: list, pipeline_id: uuid.UUID) -> list[dict]:
+    """Extract and enrich chart results with URLs."""
+    charts = []
+    for r in results:
+        if r.result_type == "chart" and r.content:
+            chart = dict(r.content)
+            chart["url"] = f"/api/v1/results/{pipeline_id}/charts/{chart.get('id', r.id)}"
+            charts.append(chart)
+    return charts
+
+
+def _first_result_content(results: list, result_type: str) -> object | None:
+    """Get the content of the first result matching the given type."""
+    for r in results:
+        if r.result_type == result_type:
+            return r.content
+    return None
+
+
+def _compute_duration_ms(pipeline: PipelineRun) -> int | None:
+    """Compute pipeline duration in milliseconds."""
+    if pipeline.started_at and pipeline.completed_at:
+        return int((pipeline.completed_at - pipeline.started_at).total_seconds() * 1000)
+    return None
+
+
+def _build_results_response(
+    pipeline: PipelineRun,
+    results: list,
+    pipeline_id: uuid.UUID,
+    dataset_name: str,
+) -> dict:
+    """Build the full results response dict from pipeline and results."""
+    findings = [
+        normalize_finding(r.content, "unknown")
+        for r in results
+        if r.result_type == "finding" and r.content and isinstance(r.content, dict)
+    ]
+    charts = _extract_charts(results, pipeline_id)
+
+    narrative = _first_result_content(results, "narrative")
+    if isinstance(narrative, dict):
+        narrative = _normalize_narrative(narrative)
+
+    validation = _first_result_content(results, "validation")
+
+    agent_summary = [
+        {"agent": ae.agent_name, "status": ae.status, "duration_ms": ae.duration_ms}
+        for ae in sorted(pipeline.agent_executions, key=lambda x: (x.tier or 0, x.agent_name))
+    ]
+
+    return {
+        "data": {
+            "pipeline_id": str(pipeline.id),
+            "question": pipeline.question,
+            "status": pipeline.status,
+            "confidence_grade": pipeline.confidence_grade,
+            "confidence_score": pipeline.confidence_score,
+            "duration_ms": _compute_duration_ms(pipeline),
+            "findings": findings,
+            "charts": charts,
+            "narrative": narrative,
+            "validation": validation,
+            "agent_summary": agent_summary,
+        },
+        "meta": {
+            "dataset_id": str(pipeline.dataset_id),
+            "dataset_name": dataset_name,
+            "execution_plan": pipeline.execution_plan,
+            "created_at": pipeline.created_at.isoformat() if pipeline.created_at else None,
+            "completed_at": pipeline.completed_at.isoformat() if pipeline.completed_at else None,
+        },
+    }
 
 
 @router.get(
@@ -190,19 +291,7 @@ async def get_results(
     cache_key = make_cache_key("results", str(pipeline_id), str(user.id))
     cached = await cache_get(cache_key)
     if cached is not None:
-        # Normalize findings in cached response (handles pre-normalization data)
-        if isinstance(cached, dict) and "data" in cached:
-            raw_findings = cached["data"].get("findings", [])
-            if raw_findings and isinstance(raw_findings, list):
-                cached["data"]["findings"] = [
-                    normalize_finding(f, "unknown") if isinstance(f, dict) else f
-                    for f in raw_findings
-                ]
-            # Normalize narrative in cached response
-            raw_narrative = cached["data"].get("narrative")
-            if isinstance(raw_narrative, dict):
-                cached["data"]["narrative"] = _normalize_narrative(raw_narrative)
-        return cached
+        return _normalize_cached_results(cached)
 
     pipeline, results = await _get_pipeline_with_results(pipeline_id, user.id, db)
 
@@ -211,66 +300,8 @@ async def get_results(
     dataset = ds_result.scalar_one_or_none()
     dataset_name = dataset.name if dataset else "Unknown"
 
-    # Categorize results
-    findings = [
-        normalize_finding(r.content, "unknown")
-        for r in results
-        if r.result_type == "finding" and r.content and isinstance(r.content, dict)
-    ]
-    charts = []
-    for r in results:
-        if r.result_type == "chart" and r.content:
-            chart = dict(r.content)
-            chart["url"] = f"/api/v1/results/{pipeline_id}/charts/{chart.get('id', r.id)}"
-            charts.append(chart)
-
-    narrative_results = [r for r in results if r.result_type == "narrative"]
-    narrative = narrative_results[0].content if narrative_results else None
-
-    # Normalize narrative: ensure detailed_findings is a string
-    if isinstance(narrative, dict):
-        narrative = _normalize_narrative(narrative)
-
-    validation_results = [r for r in results if r.result_type == "validation"]
-    validation = validation_results[0].content if validation_results else None
-
-    # Agent summary
-    agent_summary = [
-        {
-            "agent": ae.agent_name,
-            "status": ae.status,
-            "duration_ms": ae.duration_ms,
-        }
-        for ae in sorted(pipeline.agent_executions, key=lambda x: (x.tier or 0, x.agent_name))
-    ]
-
-    # Compute duration
-    duration_ms = None
-    if pipeline.started_at and pipeline.completed_at:
-        duration_ms = int((pipeline.completed_at - pipeline.started_at).total_seconds() * 1000)
-
-    response = {
-        "data": {
-            "pipeline_id": str(pipeline.id),
-            "question": pipeline.question,
-            "status": pipeline.status,
-            "confidence_grade": pipeline.confidence_grade,
-            "confidence_score": pipeline.confidence_score,
-            "duration_ms": duration_ms,
-            "findings": findings,
-            "charts": charts,
-            "narrative": narrative,
-            "validation": validation,
-            "agent_summary": agent_summary,
-        },
-        "meta": {
-            "dataset_id": str(pipeline.dataset_id),
-            "dataset_name": dataset_name,
-            "execution_plan": pipeline.execution_plan,
-            "created_at": pipeline.created_at.isoformat() if pipeline.created_at else None,
-            "completed_at": pipeline.completed_at.isoformat() if pipeline.completed_at else None,
-        },
-    }
+    # Build response from results
+    response = _build_results_response(pipeline, results, pipeline_id, dataset_name)
 
     # Cache only completed pipelines (1 hour TTL)
     if pipeline.status == "completed":
